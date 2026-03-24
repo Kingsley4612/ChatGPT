@@ -14,14 +14,14 @@ export interface CreateWorkbookOptions {
 }
 
 /**
- * 一期先封装 Univer Adapter 接口，当前用 lightweight 实现保证 demo 可运行。
- * 后续替换为 @univerjs/* 实例化逻辑，不影响页面层。
+ * Univer 适配层（MVP）：提供与页面解耦的数据结构与能力。
+ * 当前实现是轻量状态变换器；可在后续替换为 @univerjs/* 实例而不改页面调用。
  */
 export class UniverAdapter {
-  private state: UniverGridState;
+  readonly initialState: UniverGridState;
 
   constructor(options: CreateWorkbookOptions) {
-    this.state = {
+    this.initialState = {
       hiddenColumns: [],
       columnWidths: Object.fromEntries(options.fields.map((f) => [f.fieldName, 140])),
       freeze: { row: 1, col: 1 },
@@ -29,26 +29,37 @@ export class UniverAdapter {
     };
   }
 
-  getState(): UniverGridState {
-    return this.state;
+  toggleColumn(state: UniverGridState, fieldName: string): UniverGridState {
+    return {
+      ...state,
+      hiddenColumns: state.hiddenColumns.includes(fieldName)
+        ? state.hiddenColumns.filter((x) => x !== fieldName)
+        : [...state.hiddenColumns, fieldName],
+    };
   }
 
-  toggleColumn(fieldName: string): void {
-    this.state.hiddenColumns = this.state.hiddenColumns.includes(fieldName)
-      ? this.state.hiddenColumns.filter((x) => x !== fieldName)
-      : [...this.state.hiddenColumns, fieldName];
+  setColumnWidth(state: UniverGridState, fieldName: string, width: number): UniverGridState {
+    return {
+      ...state,
+      columnWidths: {
+        ...state.columnWidths,
+        [fieldName]: Math.max(80, Math.min(360, width)),
+      },
+    };
   }
 
-  setColumnWidth(fieldName: string, width: number): void {
-    this.state.columnWidths[fieldName] = width;
+  setFreeze(state: UniverGridState, row: number, col: number): UniverGridState {
+    return {
+      ...state,
+      freeze: { row, col },
+    };
   }
 
-  setFreeze(row: number, col: number): void {
-    this.state.freeze = { row, col };
-  }
-
-  setActiveSheet(sheetName: string): void {
-    this.state.activeSheet = sheetName;
+  setActiveSheet(state: UniverGridState, sheetName: string): UniverGridState {
+    return {
+      ...state,
+      activeSheet: sheetName,
+    };
   }
 
   validateFormula(formula: string): boolean {
