@@ -262,6 +262,33 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
               </label>
             ))}
           </div>
+          <div className="card" style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <strong>当前筛选：</strong>
+            {Object.entries(filters)
+              .filter(([, v]) => v)
+              .map(([k, v]) => (
+                <span key={k} style={{ background: '#e2e8f0', borderRadius: 12, padding: '2px 8px' }}>
+                  {k}: {v}
+                  <button
+                    style={{ marginLeft: 6, background: '#64748b', padding: '2px 6px' }}
+                    onClick={() => {
+                      setFilters((prev) => ({ ...prev, [k]: '' }));
+                      setToast(`已移除筛选 ${k}`);
+                    }}
+                  >
+                    x
+                  </button>
+                </span>
+              ))}
+            <button
+              onClick={() => {
+                setFilters({});
+                setToast('已清空所有筛选');
+              }}
+            >
+              清空筛选
+            </button>
+          </div>
 
           <WorkbookShell
             fields={displayFields}
@@ -289,6 +316,7 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
               setToast(`已修改单元格 ${fieldName}`);
             }}
             onColumnWidthChange={(fieldName, width) => updateActiveSheet((state) => adapter.setColumnWidth(state, fieldName, width))}
+            filterValues={filters}
             onSort={(fieldName, order) => {
               setSortBy(fieldName);
               setSortOrder(order);

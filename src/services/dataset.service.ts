@@ -115,7 +115,7 @@ class DatasetService {
     if (req.filters) {
       Object.entries(req.filters).forEach(([k, v]) => {
         if (v !== '') {
-          rows = rows.filter((r) => String(r[k]) === String(v));
+          rows = rows.filter((r) => String(r[k]).toLowerCase().includes(String(v).toLowerCase()));
         }
       });
     }

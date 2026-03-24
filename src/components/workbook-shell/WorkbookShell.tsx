@@ -11,6 +11,7 @@ interface Props {
   onSelectCell: (rowIndex: number, fieldName: string, multi: boolean) => void;
   onSort: (fieldName: string, order: 'asc' | 'desc') => void;
   onFilter: (fieldName: string, value: string) => void;
+  filterValues: Record<string, string>;
   onColumnWidthChange: (fieldName: string, width: number) => void;
   onEditCell: (rowIndex: number, fieldName: string, value: string) => void;
 }
@@ -25,6 +26,7 @@ export function WorkbookShell({
   onSelectCell,
   onSort,
   onFilter,
+  filterValues,
   onColumnWidthChange,
   onEditCell,
 }: Props) {
@@ -71,10 +73,9 @@ export function WorkbookShell({
                 {field.filterable && (
                   <input
                     placeholder="筛选"
+                    value={filterValues[field.fieldName] ?? ''}
                     style={{ width: '94%' }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') onFilter(field.fieldName, (e.target as HTMLInputElement).value);
-                    }}
+                    onChange={(e) => onFilter(field.fieldName, e.target.value)}
                   />
                 )}
                 <input

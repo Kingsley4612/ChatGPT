@@ -33,6 +33,7 @@ export function Toolbar({
       <span style={{ color: '#94a3b8' }}>|</span>
       <span>{workbookName}</span>
       <input placeholder="搜索关键字" onChange={(e) => onSearch(e.target.value)} />
+      <span style={{ fontSize: 12, color: '#64748b' }}>筛选支持实时输入（无需回车）</span>
       <button onClick={onFreezeFirstRow}>冻结首行</button>
       <button onClick={onFreezeFirstCol}>冻结首列</button>
       <label style={{ border: '1px dashed #94a3b8', padding: '6px 10px', borderRadius: 6, cursor: 'pointer' }}>
