@@ -8,6 +8,7 @@ interface Props {
   onApplyFormula: () => void;
   onFreezeFirstRow: () => void;
   onFreezeFirstCol: () => void;
+  onImportCsv: (file: File) => void;
   onSaveView: () => void;
   onSaveWorkbook: () => void;
 }
@@ -22,17 +23,30 @@ export function Toolbar({
   onApplyFormula,
   onFreezeFirstRow,
   onFreezeFirstCol,
+  onImportCsv,
   onSaveView,
   onSaveWorkbook,
 }: Props) {
   return (
-    <div style={{ display: 'flex', gap: 8, alignItems: 'center', padding: 8, borderBottom: '1px solid #eee', flexWrap: 'wrap' }}>
+    <div className="card" style={{ display: 'flex', gap: 8, alignItems: 'center', padding: 8, flexWrap: 'wrap', marginTop: 8 }}>
       <strong>{datasetName}</strong>
-      <span>|</span>
+      <span style={{ color: '#94a3b8' }}>|</span>
       <span>{workbookName}</span>
       <input placeholder="搜索关键字" onChange={(e) => onSearch(e.target.value)} />
       <button onClick={onFreezeFirstRow}>冻结首行</button>
       <button onClick={onFreezeFirstCol}>冻结首列</button>
+      <label style={{ border: '1px dashed #94a3b8', padding: '6px 10px', borderRadius: 6, cursor: 'pointer' }}>
+        导入 CSV
+        <input
+          type="file"
+          accept=".csv"
+          style={{ display: 'none' }}
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) onImportCsv(file);
+          }}
+        />
+      </label>
       <input
         value={formula}
         onChange={(e) => onFormulaChange(e.target.value)}

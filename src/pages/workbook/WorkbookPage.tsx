@@ -11,6 +11,7 @@ import { UniverAdapter, type UniverGridState } from '../../adapters/univer/unive
 import { viewSaveService } from '../../features/view-save/viewSave.service';
 import { workbookService } from '../../services/workbook.service';
 import { useAudit } from '../../features/audit/useAudit';
+import { datasetService } from '../../services/dataset.service';
 
 interface Props {
   datasetId: string;
@@ -38,6 +39,7 @@ function evaluateFormula(formula: string, row: Record<string, unknown>): unknown
 
 export function WorkbookPage({ datasetId, onBack }: Props) {
   const [page, setPage] = useState(0);
+  const [refreshKey, setRefreshKey] = useState(0);
   const [keyword, setKeyword] = useState('');
   const [sortBy, setSortBy] = useState<string>();
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
@@ -47,6 +49,8 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
   const [formula, setFormula] = useState('=ROUND(amount,2)');
   const [formulaError, setFormulaError] = useState<string | null>(null);
   const [selectedCells, setSelectedCells] = useState<Set<string>>(new Set());
+  const [toast, setToast] = useState<string | null>(null);
+  const [editedRows, setEditedRows] = useState<Record<string, unknown>[] | null>(null);
 
   const { user, security } = useSecurity();
   const { emit } = useAudit(datasetId);
@@ -57,6 +61,7 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
     sortBy,
     sortOrder,
     filters,
+    reloadKey: refreshKey,
   });
 
   const adapter = useMemo(() => {
@@ -71,16 +76,27 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
     setSheetStates(SHEETS.map((name) => ({ name, grid: adapter.initialState })));
   }, [adapter]);
 
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 2400);
+    return () => clearTimeout(timer);
+  }, [toast]);
+
   const activeSheetState = sheetStates.find((s) => s.name === activeSheet) ?? sheetStates[0];
 
   useEffect(() => {
     emit('open_dataset', { datasetId });
   }, [datasetId, emit]);
 
+  useEffect(() => {
+    setEditedRows(null);
+  }, [pageData]);
+
+  const rawRows = editedRows ?? pageData?.rows ?? [];
+
   const rowsWithFormula = useMemo(() => {
-    if (!pageData) return [];
-    return pageData.rows.map((row) => ({ ...row, calc_col: evaluateFormula(formula, row) }));
-  }, [pageData, formula]);
+    return rawRows.map((row) => ({ ...row, calc_col: evaluateFormula(formula, row) }));
+  }, [rawRows, formula]);
 
   const maskedRows = useMemo(() => {
     if (!meta || !rowsWithFormula.length) return [];
@@ -101,7 +117,7 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
   }, [meta]);
 
   const summary = useMemo(() => {
-    if (!maskedRows.length || !meta) return { sum: 0, avg: 0, count: 0 };
+    if (!maskedRows.length) return { sum: 0, avg: 0, count: 0 };
     const numericValues: number[] = [];
 
     selectedCells.forEach((key) => {
@@ -120,15 +136,13 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
 
     const sum = values.reduce((acc, cur) => acc + cur, 0);
     return { sum, avg: values.length ? sum / values.length : 0, count: values.length };
-  }, [maskedRows, meta, selectedCells]);
+  }, [maskedRows, selectedCells]);
 
   if (error) return <div>加载失败: {error}</div>;
   if (!meta || !pageData || !adapter || !activeSheetState) return <div>{loading ? '加载中...' : '暂无数据'}</div>;
 
   const updateActiveSheet = (updater: (state: UniverGridState) => UniverGridState) => {
-    setSheetStates((prev) =>
-      prev.map((sheet) => (sheet.name === activeSheetState.name ? { ...sheet, grid: updater(sheet.grid) } : sheet)),
-    );
+    setSheetStates((prev) => prev.map((sheet) => (sheet.name === activeSheetState.name ? { ...sheet, grid: updater(sheet.grid) } : sheet)));
   };
 
   return (
@@ -142,15 +156,30 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
             formula={formula}
             formulaError={formulaError}
             onFormulaChange={setFormula}
+            onImportCsv={async (file) => {
+              const text = await file.text();
+              const result = await datasetService.importCsv(text);
+              setPage(0);
+              setRefreshKey((x) => x + 1);
+              setToast(`导入成功：${result.imported} 行`);
+            }}
             onApplyFormula={() => {
               if (!adapter.validateFormula(formula)) {
                 setFormulaError('公式不在白名单中');
+                setToast('公式不在白名单中');
                 return;
               }
               setFormulaError(null);
+              setToast('公式已应用');
             }}
-            onFreezeFirstRow={() => updateActiveSheet((state) => adapter.setFreeze(state, 1, state.freeze.col))}
-            onFreezeFirstCol={() => updateActiveSheet((state) => adapter.setFreeze(state, state.freeze.row, 1))}
+            onFreezeFirstRow={() => {
+              updateActiveSheet((state) => adapter.setFreeze(state, 1, state.freeze.col));
+              setToast('已冻结首行');
+            }}
+            onFreezeFirstCol={() => {
+              updateActiveSheet((state) => adapter.setFreeze(state, state.freeze.row, 1));
+              setToast('已冻结首列');
+            }}
             onSearch={(value) => {
               setKeyword(value);
               emit('search', { keyword: value });
@@ -166,15 +195,14 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
                 filters,
                 sortBy,
                 sortOrder,
-                visibleColumns: displayFields
-                  .filter((f) => !activeSheetState.grid.hiddenColumns.includes(f.fieldName))
-                  .map((f) => f.fieldName),
+                visibleColumns: displayFields.filter((f) => !activeSheetState.grid.hiddenColumns.includes(f.fieldName)).map((f) => f.fieldName),
                 columnWidths: activeSheetState.grid.columnWidths,
                 freeze: activeSheetState.grid.freeze,
                 activeSheet: activeSheetState.grid.activeSheet,
                 createdAt: new Date().toISOString(),
               });
               emit('save_view', { viewName });
+              setToast(`视图“${viewName}”保存成功`);
             }}
             onSaveWorkbook={() => {
               if (!user.capabilities.canSaveWorkbook) return;
@@ -203,25 +231,33 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
                 updatedAt: new Date().toISOString(),
               });
               emit('save_workbook', { workbookName: name });
+              setToast(`工作簿“${name}”保存成功`);
             }}
           />
-          <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+          <div className="card" style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
             <button
               onClick={async () => {
                 if (!(user.capabilities.canCopy && security.allowCopy)) return;
                 await navigator.clipboard.writeText(JSON.stringify(maskedRows.slice(0, 20)));
                 emit('copy', { rowCount: Math.min(maskedRows.length, 20) });
+                setToast('已复制前20行');
               }}
             >
               复制前20行
             </button>
+            <button
+              onClick={async () => {
+                await datasetService.clearImportedRows();
+                setPage(0);
+                setRefreshKey((x) => x + 1);
+                setToast('已恢复系统示例数据');
+              }}
+            >
+              恢复示例数据
+            </button>
             {displayFields.map((f) => (
               <label key={f.fieldName}>
-                <input
-                  type="checkbox"
-                  checked={!activeSheetState.grid.hiddenColumns.includes(f.fieldName)}
-                  onChange={() => updateActiveSheet((state) => adapter.toggleColumn(state, f.fieldName))}
-                />
+                <input type="checkbox" checked={!activeSheetState.grid.hiddenColumns.includes(f.fieldName)} onChange={() => updateActiveSheet((state) => adapter.toggleColumn(state, f.fieldName))} />
                 {f.title}
               </label>
             ))}
@@ -239,17 +275,20 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
                 const next = new Set(prev);
                 const key = `${rowIndex}:${fieldName}`;
                 if (!multi) next.clear();
-                if (next.has(key)) {
-                  next.delete(key);
-                } else {
-                  next.add(key);
-                }
+                if (next.has(key)) next.delete(key);
+                else next.add(key);
                 return next;
               });
             }}
-            onColumnWidthChange={(fieldName, width) =>
-              updateActiveSheet((state) => adapter.setColumnWidth(state, fieldName, width))
-            }
+            onEditCell={(rowIndex, fieldName, value) => {
+              setEditedRows((prev) => {
+                const current = [...(prev ?? rawRows)];
+                current[rowIndex] = { ...current[rowIndex], [fieldName]: value };
+                return current;
+              });
+              setToast(`已修改单元格 ${fieldName}`);
+            }}
+            onColumnWidthChange={(fieldName, width) => updateActiveSheet((state) => adapter.setColumnWidth(state, fieldName, width))}
             onSort={(fieldName, order) => {
               setSortBy(fieldName);
               setSortOrder(order);
@@ -261,17 +300,17 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
             }}
           />
 
-          <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
+          <div className="card" style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
             <button disabled={page === 0} onClick={() => setPage((p) => Math.max(p - 1, 0))}>上一页</button>
             <button disabled={!pageData.hasMore} onClick={() => setPage((p) => p + 1)}>下一页</button>
             <span> 当前第 {page + 1} 页 / 总行数 {meta.totalRows.toLocaleString()} </span>
           </div>
 
-          <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
+          <div className="card" style={{ marginTop: 8, display: 'flex', gap: 8 }}>
             {SHEETS.map((sheetName) => (
               <button
                 key={sheetName}
-                style={{ fontWeight: sheetName === activeSheet ? 700 : 400 }}
+                style={{ fontWeight: sheetName === activeSheet ? 700 : 400, background: sheetName === activeSheet ? '#1d4ed8' : '#64748b' }}
                 onClick={() => {
                   setActiveSheet(sheetName);
                   updateActiveSheet((state) => adapter.setActiveSheet(state, sheetName));
@@ -282,11 +321,12 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
             ))}
           </div>
 
-          <footer style={{ marginTop: 8, borderTop: '1px solid #eee', paddingTop: 8 }}>
+          <footer className="card" style={{ marginTop: 8 }}>
             状态栏汇总: SUM={summary.sum.toFixed(2)} | AVG={summary.avg.toFixed(2)} | COUNT={summary.count}
           </footer>
         </SecurityGuard>
       </div>
+      {toast ? <div className="toast">{toast}</div> : null}
     </Watermark>
   );
 }

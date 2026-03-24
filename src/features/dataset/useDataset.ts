@@ -2,7 +2,11 @@ import { useEffect, useState } from 'react';
 import { datasetService } from '../../services/dataset.service';
 import type { DatasetMeta, DatasetPageRequest, DatasetPageResponse } from '../../types/models';
 
-export function useDataset(datasetId: string, req: Omit<DatasetPageRequest, 'datasetId'>) {
+interface UseDatasetRequest extends Omit<DatasetPageRequest, 'datasetId'> {
+  reloadKey?: number;
+}
+
+export function useDataset(datasetId: string, req: UseDatasetRequest) {
   const [meta, setMeta] = useState<DatasetMeta | null>(null);
   const [page, setPage] = useState<DatasetPageResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -10,7 +14,7 @@ export function useDataset(datasetId: string, req: Omit<DatasetPageRequest, 'dat
 
   useEffect(() => {
     datasetService.getDatasetMeta(datasetId).then(setMeta).catch((e: Error) => setError(e.message));
-  }, [datasetId]);
+  }, [datasetId, req.reloadKey]);
 
   useEffect(() => {
     setLoading(true);
@@ -20,7 +24,7 @@ export function useDataset(datasetId: string, req: Omit<DatasetPageRequest, 'dat
       .then(setPage)
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false));
-  }, [datasetId, req.page, req.pageSize, req.sortBy, req.sortOrder, req.keyword, JSON.stringify(req.filters)]);
+  }, [datasetId, req.page, req.pageSize, req.sortBy, req.sortOrder, req.keyword, JSON.stringify(req.filters), req.reloadKey]);
 
   return { meta, page, loading, error };
 }

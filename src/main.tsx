@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { AnalysisCenterPage } from './pages/analysis-center/AnalysisCenterPage';
 import { WorkbookPage } from './pages/workbook/WorkbookPage';
 import { MyAnalysisPage } from './pages/my-analysis/MyAnalysisPage';
+import './styles.css';
 
 type Route =
   | { name: 'home' }

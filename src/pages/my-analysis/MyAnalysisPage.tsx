@@ -16,59 +16,63 @@ export function MyAnalysisPage({ onBack }: Props) {
       <h2>我的分析</h2>
       <button onClick={onBack}>返回首页</button>
 
-      <h3>个人视图</h3>
-      {views.length === 0 ? <p>暂无视图</p> : null}
-      {views.map((v) => (
-        <div key={v.viewId} style={{ marginBottom: 8 }}>
-          <span>{v.name}</span>
-          <button
-            onClick={() => {
-              const next = prompt('重命名视图', v.name);
-              if (next) {
-                viewSaveService.rename(v.viewId, next);
+      <div className="card" style={{ marginTop: 12 }}>
+        <h3>个人视图</h3>
+        {views.length === 0 ? <p>暂无视图</p> : null}
+        {views.map((v) => (
+          <div key={v.viewId} style={{ marginBottom: 8 }}>
+            <span>{v.name}</span>
+            <button
+              onClick={() => {
+                const next = prompt('重命名视图', v.name);
+                if (next) {
+                  viewSaveService.rename(v.viewId, next);
+                  setRefreshKey((x) => x + 1);
+                }
+              }}
+            >
+              重命名
+            </button>
+            <button
+              onClick={() => {
+                viewSaveService.remove(v.viewId);
                 setRefreshKey((x) => x + 1);
-              }
-            }}
-          >
-            重命名
-          </button>
-          <button
-            onClick={() => {
-              viewSaveService.remove(v.viewId);
-              setRefreshKey((x) => x + 1);
-            }}
-          >
-            删除
-          </button>
-        </div>
-      ))}
+              }}
+            >
+              删除
+            </button>
+          </div>
+        ))}
+      </div>
 
-      <h3>个人分析工作簿</h3>
-      {workbooks.length === 0 ? <p>暂无工作簿</p> : null}
-      {workbooks.map((w) => (
-        <div key={w.workbookId} style={{ marginBottom: 8 }}>
-          <span>{w.name}</span>
-          <button
-            onClick={() => {
-              const next = prompt('重命名工作簿', w.name);
-              if (next) {
-                workbookService.save({ ...w, name: next, updatedAt: new Date().toISOString() });
+      <div className="card" style={{ marginTop: 12 }}>
+        <h3>个人分析工作簿</h3>
+        {workbooks.length === 0 ? <p>暂无工作簿</p> : null}
+        {workbooks.map((w) => (
+          <div key={w.workbookId} style={{ marginBottom: 8 }}>
+            <span>{w.name}</span>
+            <button
+              onClick={() => {
+                const next = prompt('重命名工作簿', w.name);
+                if (next) {
+                  workbookService.save({ ...w, name: next, updatedAt: new Date().toISOString() });
+                  setRefreshKey((x) => x + 1);
+                }
+              }}
+            >
+              重命名
+            </button>
+            <button
+              onClick={() => {
+                workbookService.remove(w.workbookId);
                 setRefreshKey((x) => x + 1);
-              }
-            }}
-          >
-            重命名
-          </button>
-          <button
-            onClick={() => {
-              workbookService.remove(w.workbookId);
-              setRefreshKey((x) => x + 1);
-            }}
-          >
-            删除
-          </button>
-        </div>
-      ))}
+              }}
+            >
+              删除
+            </button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

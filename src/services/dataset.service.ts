@@ -2,6 +2,7 @@ import type { DatasetMeta, DatasetPageRequest, DatasetPageResponse } from '../ty
 
 const DATASET_ID = 'risk_orders';
 const TOTAL_ROWS = 1_000_000;
+const IMPORT_KEY = 'analysis.imported.rows';
 
 const fields = [
   { fieldName: 'orderId', title: '订单号', type: 'string', sortable: true, filterable: true, sensitive: false },
@@ -31,36 +32,95 @@ function generateRow(index: number): Record<string, unknown> {
   };
 }
 
+function getImportedRows(): Record<string, unknown>[] {
+  const raw = localStorage.getItem(IMPORT_KEY);
+  return raw ? (JSON.parse(raw) as Record<string, unknown>[]) : [];
+}
+
+function saveImportedRows(rows: Record<string, unknown>[]): void {
+  localStorage.setItem(IMPORT_KEY, JSON.stringify(rows));
+}
+
 class DatasetService {
   async listDatasets(): Promise<DatasetMeta[]> {
-    return [datasetMeta];
+    return [
+      {
+        ...datasetMeta,
+        totalRows: getImportedRows().length || datasetMeta.totalRows,
+      },
+    ];
   }
 
   async getDatasetMeta(datasetId: string): Promise<DatasetMeta> {
     if (datasetId !== DATASET_ID) {
       throw new Error(`dataset ${datasetId} not found`);
     }
-    return datasetMeta;
+    return {
+      ...datasetMeta,
+      totalRows: getImportedRows().length || datasetMeta.totalRows,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  async importCsv(csvText: string): Promise<{ imported: number }> {
+    const lines = csvText
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    if (lines.length < 2) {
+      throw new Error('CSV 至少包含表头和一行数据');
+    }
+
+    const headers = lines[0].split(',').map((x) => x.trim());
+    const rows = lines.slice(1).map((line) => {
+      const cells = line.split(',');
+      const row: Record<string, unknown> = {};
+      headers.forEach((h, idx) => {
+        row[h] = (cells[idx] ?? '').trim();
+      });
+      return row;
+    });
+
+    saveImportedRows(rows);
+    return { imported: rows.length };
+  }
+
+  async clearImportedRows(): Promise<void> {
+    localStorage.removeItem(IMPORT_KEY);
   }
 
   async getDatasetPage(req: DatasetPageRequest): Promise<DatasetPageResponse> {
     if (req.datasetId !== DATASET_ID) {
       throw new Error(`dataset ${req.datasetId} not found`);
     }
-    const start = req.page * req.pageSize;
-    const end = Math.min(start + req.pageSize, TOTAL_ROWS);
-    let rows = Array.from({ length: end - start }, (_, i) => generateRow(start + i));
+
+    const imported = getImportedRows();
+    let rows: Record<string, unknown>[];
+    let totalRows: number;
+
+    if (imported.length) {
+      rows = imported;
+      totalRows = imported.length;
+    } else {
+      const startBase = req.page * req.pageSize;
+      const endBase = Math.min(startBase + req.pageSize, TOTAL_ROWS);
+      rows = Array.from({ length: endBase - startBase }, (_, i) => generateRow(startBase + i));
+      totalRows = TOTAL_ROWS;
+    }
 
     if (req.keyword) {
       rows = rows.filter((row) => JSON.stringify(row).includes(req.keyword ?? ''));
     }
     if (req.filters) {
       Object.entries(req.filters).forEach(([k, v]) => {
-        rows = rows.filter((r) => String(r[k]) === String(v));
+        if (v !== '') {
+          rows = rows.filter((r) => String(r[k]) === String(v));
+        }
       });
     }
     if (req.sortBy) {
-      rows = rows.sort((a, b) => {
+      rows = [...rows].sort((a, b) => {
         const av = a[req.sortBy!];
         const bv = b[req.sortBy!];
         if (av === bv) return 0;
@@ -69,15 +129,22 @@ class DatasetService {
       });
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 120));
+    if (imported.length) {
+      totalRows = rows.length;
+    }
+    const start = req.page * req.pageSize;
+    const end = imported.length ? Math.min(start + req.pageSize, totalRows) : Math.min(rows.length, req.pageSize);
+    const pageRows = imported.length ? rows.slice(start, end) : rows.slice(0, end);
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
 
     return {
       datasetId: req.datasetId,
       page: req.page,
       pageSize: req.pageSize,
-      totalRows: TOTAL_ROWS,
-      rows,
-      hasMore: end < TOTAL_ROWS,
+      totalRows,
+      rows: pageRows,
+      hasMore: end < totalRows,
     };
   }
 }

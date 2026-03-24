@@ -12,6 +12,7 @@ interface Props {
   onSort: (fieldName: string, order: 'asc' | 'desc') => void;
   onFilter: (fieldName: string, value: string) => void;
   onColumnWidthChange: (fieldName: string, width: number) => void;
+  onEditCell: (rowIndex: number, fieldName: string, value: string) => void;
 }
 
 export function WorkbookShell({
@@ -25,15 +26,17 @@ export function WorkbookShell({
   onSort,
   onFilter,
   onColumnWidthChange,
+  onEditCell,
 }: Props) {
   const [orderMap, setOrderMap] = useState<Record<string, 'asc' | 'desc'>>({});
+  const [editing, setEditing] = useState<{ row: number; field: string } | null>(null);
   const visibleFields = useMemo(
     () => fields.filter((f) => !hiddenColumns.includes(f.fieldName)),
     [fields, hiddenColumns],
   );
 
   return (
-    <div style={{ overflow: 'auto', border: '1px solid #ddd', marginTop: 8, maxHeight: 500 }}>
+    <div className="card" style={{ overflow: 'auto', marginTop: 8, maxHeight: 500, padding: 0 }}>
       <table style={{ borderCollapse: 'collapse', width: '100%', tableLayout: 'fixed' }}>
         <thead>
           <tr>
@@ -47,7 +50,7 @@ export function WorkbookShell({
                   position: freeze.row >= 1 ? 'sticky' : 'static',
                   top: 0,
                   zIndex: 3,
-                  background: '#fafafa',
+                  background: '#eff6ff',
                   left: freeze.col >= 1 && index === 0 ? 0 : undefined,
                 }}
               >
@@ -91,10 +94,12 @@ export function WorkbookShell({
               {visibleFields.map((field, colIndex) => {
                 const key = `${idx}:${field.fieldName}`;
                 const selected = selectedCells.has(key);
+                const isEditing = editing?.row === idx && editing.field === field.fieldName;
                 return (
                   <td
                     key={field.fieldName}
                     onClick={(e) => onSelectCell(idx, field.fieldName, e.ctrlKey || e.metaKey)}
+                    onDoubleClick={() => setEditing({ row: idx, field: field.fieldName })}
                     style={{
                       border: '1px solid #f0f0f0',
                       padding: 4,
@@ -105,7 +110,24 @@ export function WorkbookShell({
                       zIndex: freeze.col >= 1 && colIndex === 0 ? 2 : 1,
                     }}
                   >
-                    {String(row[field.fieldName] ?? '')}
+                    {isEditing ? (
+                      <input
+                        autoFocus
+                        defaultValue={String(row[field.fieldName] ?? '')}
+                        onBlur={(e) => {
+                          onEditCell(idx, field.fieldName, e.target.value);
+                          setEditing(null);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            onEditCell(idx, field.fieldName, (e.target as HTMLInputElement).value);
+                            setEditing(null);
+                          }
+                        }}
+                      />
+                    ) : (
+                      String(row[field.fieldName] ?? '')
+                    )}
                   </td>
                 );
               })}
