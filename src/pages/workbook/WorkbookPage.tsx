@@ -52,6 +52,8 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
   const [selectedCells, setSelectedCells] = useState<Set<string>>(new Set());
   const [toast, setToast] = useState<string | null>(null);
   const [editedRows, setEditedRows] = useState<Record<string, unknown>[] | null>(null);
+  const [addedRows, setAddedRows] = useState<Record<string, unknown>[]>([]);
+  const [customColumns, setCustomColumns] = useState<Array<{ fieldName: string; title: string }>>([]);
   const [selectedWidthField, setSelectedWidthField] = useState('orderId');
 
   const { user, security } = useSecurity();
@@ -92,9 +94,11 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
 
   useEffect(() => {
     setEditedRows(null);
+    setAddedRows([]);
   }, [pageData]);
 
-  const rawRows = editedRows ?? pageData?.rows ?? [];
+  const baseRows = editedRows ?? pageData?.rows ?? [];
+  const rawRows = [...baseRows, ...addedRows];
 
   const rowsWithFormula = useMemo(() => {
     return rawRows.map((row) => ({ ...row, calc_col: evaluateFormula(formula, row) }));
@@ -115,8 +119,16 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
 
   const displayFields = useMemo(() => {
     if (!meta) return [];
-    return [...meta.fields, { fieldName: 'calc_col', title: '公式列', type: 'number', sortable: false, filterable: false, sensitive: false }];
-  }, [meta]);
+    const custom = customColumns.map((c) => ({
+      fieldName: c.fieldName,
+      title: c.title,
+      type: 'string' as const,
+      sortable: true,
+      filterable: true,
+      sensitive: false,
+    }));
+    return [...meta.fields, ...custom, { fieldName: 'calc_col', title: '公式列', type: 'number', sortable: false, filterable: false, sensitive: false }];
+  }, [meta, customColumns]);
   const selectedWidthValue = activeSheetState?.grid.columnWidths[selectedWidthField] ?? 140;
 
   const summary = useMemo(() => {
@@ -295,6 +307,29 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
             >
               恢复示例数据
             </button>
+            <button
+              onClick={() => {
+                const empty = Object.fromEntries(displayFields.map((f) => [f.fieldName, '']));
+                setAddedRows((prev) => [...prev, empty]);
+                setToast('已新增一行');
+              }}
+            >
+              新增行
+            </button>
+            <button
+              onClick={() => {
+                const name = prompt('请输入新列名称(英文/数字)', `col_${customColumns.length + 1}`);
+                if (!name) return;
+                if (displayFields.some((f) => f.fieldName === name)) {
+                  setToast('列名已存在');
+                  return;
+                }
+                setCustomColumns((prev) => [...prev, { fieldName: name, title: name }]);
+                setToast(`已新增列 ${name}`);
+              }}
+            >
+              新增列
+            </button>
             {displayFields.map((f) => (
               <label key={f.fieldName}>
                 <input type="checkbox" checked={!activeSheetState.grid.hiddenColumns.includes(f.fieldName)} onChange={() => updateActiveSheet((state) => adapter.toggleColumn(state, f.fieldName))} />
@@ -337,22 +372,41 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
             columnWidths={activeSheetState.grid.columnWidths}
             freeze={activeSheetState.grid.freeze}
             selectedCells={selectedCells}
-            onSelectCell={(rowIndex, fieldName, multi) => {
+            onSelectRange={(startRow, endRow, startField, endField, append) => {
+              const rowMin = Math.min(startRow, endRow);
+              const rowMax = Math.max(startRow, endRow);
+              const visible = displayFields.filter((f) => !activeSheetState.grid.hiddenColumns.includes(f.fieldName));
+              const colStart = visible.findIndex((f) => f.fieldName === startField);
+              const colEnd = visible.findIndex((f) => f.fieldName === endField);
+              const colMin = Math.min(colStart, colEnd);
+              const colMax = Math.max(colStart, colEnd);
+
               setSelectedCells((prev) => {
-                const next = new Set(prev);
-                const key = `${rowIndex}:${fieldName}`;
-                if (!multi) next.clear();
-                if (next.has(key)) next.delete(key);
-                else next.add(key);
+                const next = append ? new Set(prev) : new Set<string>();
+                for (let r = rowMin; r <= rowMax; r += 1) {
+                  for (let c = colMin; c <= colMax; c += 1) {
+                    const field = visible[c];
+                    if (field) next.add(`${r}:${field.fieldName}`);
+                  }
+                }
                 return next;
               });
             }}
             onEditCell={(rowIndex, fieldName, value) => {
-              setEditedRows((prev) => {
-                const current = [...(prev ?? rawRows)];
-                current[rowIndex] = { ...current[rowIndex], [fieldName]: value };
-                return current;
-              });
+              if (rowIndex < baseRows.length) {
+                setEditedRows((prev) => {
+                  const current = [...(prev ?? baseRows)];
+                  current[rowIndex] = { ...current[rowIndex], [fieldName]: value };
+                  return current;
+                });
+              } else {
+                const addedIndex = rowIndex - baseRows.length;
+                setAddedRows((prev) => {
+                  const current = [...prev];
+                  current[addedIndex] = { ...(current[addedIndex] ?? {}), [fieldName]: value };
+                  return current;
+                });
+              }
               setToast(`已修改单元格 ${fieldName}`);
             }}
             filterValues={filters}

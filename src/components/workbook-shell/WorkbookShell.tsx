@@ -8,7 +8,7 @@ interface Props {
   columnWidths: Record<string, number>;
   freeze: { row: number; col: number };
   selectedCells: Set<string>;
-  onSelectCell: (rowIndex: number, fieldName: string, multi: boolean) => void;
+  onSelectRange: (startRow: number, endRow: number, startField: string, endField: string, append: boolean) => void;
   onSort: (fieldName: string, order: 'asc' | 'desc') => void;
   onFilter: (fieldName: string, value: string) => void;
   filterValues: Record<string, string>;
@@ -22,7 +22,7 @@ export function WorkbookShell({
   columnWidths,
   freeze,
   selectedCells,
-  onSelectCell,
+  onSelectRange,
   onSort,
   onFilter,
   filterValues,
@@ -30,6 +30,7 @@ export function WorkbookShell({
 }: Props) {
   const [orderMap, setOrderMap] = useState<Record<string, 'asc' | 'desc'>>({});
   const [editing, setEditing] = useState<{ row: number; field: string } | null>(null);
+  const [dragStart, setDragStart] = useState<{ row: number; field: string; append: boolean } | null>(null);
   const visibleFields = useMemo(
     () => fields.filter((f) => !hiddenColumns.includes(f.fieldName)),
     [fields, hiddenColumns],
@@ -37,7 +38,7 @@ export function WorkbookShell({
 
   return (
     <div className="card" style={{ overflow: 'auto', marginTop: 8, maxHeight: 500, padding: 0 }}>
-      <table style={{ borderCollapse: 'collapse', width: '100%', tableLayout: 'fixed' }}>
+      <table style={{ borderCollapse: 'collapse', width: '100%', tableLayout: 'fixed', userSelect: 'none' }}>
         <thead>
           <tr>
             {visibleFields.map((field, index) => (
@@ -80,7 +81,7 @@ export function WorkbookShell({
             ))}
           </tr>
         </thead>
-        <tbody>
+        <tbody onMouseUp={() => setDragStart(null)}>
           {rows.map((row, idx) => (
             <tr key={idx}>
               {visibleFields.map((field, colIndex) => {
@@ -90,7 +91,15 @@ export function WorkbookShell({
                 return (
                   <td
                     key={field.fieldName}
-                    onClick={(e) => onSelectCell(idx, field.fieldName, e.ctrlKey || e.metaKey)}
+                    onMouseDown={(e) => {
+                      const append = e.ctrlKey || e.metaKey;
+                      setDragStart({ row: idx, field: field.fieldName, append });
+                      onSelectRange(idx, idx, field.fieldName, field.fieldName, append);
+                    }}
+                    onMouseEnter={() => {
+                      if (!dragStart) return;
+                      onSelectRange(dragStart.row, idx, dragStart.field, field.fieldName, dragStart.append);
+                    }}
                     onDoubleClick={() => setEditing({ row: idx, field: field.fieldName })}
                     style={{
                       border: '1px solid #f0f0f0',
