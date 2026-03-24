@@ -45,12 +45,14 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
   const [filters, setFilters] = useState<Record<string, string>>({});
   const [workbookName, setWorkbookName] = useState('临时工作簿');
+  const [workbookId, setWorkbookId] = useState<string | null>(null);
   const [activeSheet, setActiveSheet] = useState(SHEETS[0]);
   const [formula, setFormula] = useState('=ROUND(amount,2)');
   const [formulaError, setFormulaError] = useState<string | null>(null);
   const [selectedCells, setSelectedCells] = useState<Set<string>>(new Set());
   const [toast, setToast] = useState<string | null>(null);
   const [editedRows, setEditedRows] = useState<Record<string, unknown>[] | null>(null);
+  const [selectedWidthField, setSelectedWidthField] = useState('orderId');
 
   const { user, security } = useSecurity();
   const { emit } = useAudit(datasetId);
@@ -115,6 +117,7 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
     if (!meta) return [];
     return [...meta.fields, { fieldName: 'calc_col', title: '公式列', type: 'number', sortable: false, filterable: false, sensitive: false }];
   }, [meta]);
+  const selectedWidthValue = activeSheetState?.grid.columnWidths[selectedWidthField] ?? 140;
 
   const summary = useMemo(() => {
     if (!maskedRows.length) return { sum: 0, avg: 0, count: 0 };
@@ -155,6 +158,13 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
             workbookName={workbookName}
             formula={formula}
             formulaError={formulaError}
+            fields={displayFields}
+            selectedWidthField={selectedWidthField}
+            selectedWidthValue={selectedWidthValue}
+            onSelectWidthField={setSelectedWidthField}
+            onChangeWidth={(width) => {
+              updateActiveSheet((state) => adapter.setColumnWidth(state, selectedWidthField, width));
+            }}
             onFormulaChange={setFormula}
             onImportCsv={async (file) => {
               const text = await file.text();
@@ -206,11 +216,10 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
             }}
             onSaveWorkbook={() => {
               if (!user.capabilities.canSaveWorkbook) return;
-              const name = prompt('输入工作簿名', workbookName);
-              if (!name) return;
-              setWorkbookName(name);
+              const name = workbookName;
+              const id = workbookId ?? crypto.randomUUID();
               workbookService.save({
-                workbookId: crypto.randomUUID(),
+                workbookId: id,
                 name,
                 datasetId,
                 sheets: sheetStates.map((sheet, index) => ({
@@ -230,8 +239,39 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
                 createdAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString(),
               });
+              setWorkbookId(id);
               emit('save_workbook', { workbookName: name });
               setToast(`工作簿“${name}”保存成功`);
+            }}
+            onSaveWorkbookAs={() => {
+              if (!user.capabilities.canSaveWorkbook) return;
+              const name = prompt('另存为工作簿名称', `${workbookName}-副本`);
+              if (!name) return;
+              const id = crypto.randomUUID();
+              setWorkbookName(name);
+              setWorkbookId(id);
+              workbookService.save({
+                workbookId: id,
+                name,
+                datasetId,
+                sheets: sheetStates.map((sheet, index) => ({
+                  sheetId: `s${index + 1}`,
+                  name: sheet.name,
+                  viewConfig: {
+                    filters,
+                    sortBy,
+                    sortOrder,
+                    visibleColumns: displayFields.map((f) => f.fieldName),
+                    columnWidths: sheet.grid.columnWidths,
+                    freeze: sheet.grid.freeze,
+                    activeSheet: sheet.grid.activeSheet,
+                  },
+                  formulaColumns: [{ fieldName: 'calc_col', formula }],
+                })),
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+              });
+              setToast(`已另存为“${name}”`);
             }}
           />
           <div className="card" style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
@@ -315,7 +355,6 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
               });
               setToast(`已修改单元格 ${fieldName}`);
             }}
-            onColumnWidthChange={(fieldName, width) => updateActiveSheet((state) => adapter.setColumnWidth(state, fieldName, width))}
             filterValues={filters}
             onSort={(fieldName, order) => {
               setSortBy(fieldName);

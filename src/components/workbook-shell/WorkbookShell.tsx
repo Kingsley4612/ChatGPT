@@ -12,7 +12,6 @@ interface Props {
   onSort: (fieldName: string, order: 'asc' | 'desc') => void;
   onFilter: (fieldName: string, value: string) => void;
   filterValues: Record<string, string>;
-  onColumnWidthChange: (fieldName: string, width: number) => void;
   onEditCell: (rowIndex: number, fieldName: string, value: string) => void;
 }
 
@@ -27,7 +26,6 @@ export function WorkbookShell({
   onSort,
   onFilter,
   filterValues,
-  onColumnWidthChange,
   onEditCell,
 }: Props) {
   const [orderMap, setOrderMap] = useState<Record<string, 'asc' | 'desc'>>({});
@@ -78,13 +76,6 @@ export function WorkbookShell({
                     onChange={(e) => onFilter(field.fieldName, e.target.value)}
                   />
                 )}
-                <input
-                  type="range"
-                  min={80}
-                  max={360}
-                  value={columnWidths[field.fieldName] ?? 140}
-                  onChange={(e) => onColumnWidthChange(field.fieldName, Number(e.target.value))}
-                />
               </th>
             ))}
           </tr>
