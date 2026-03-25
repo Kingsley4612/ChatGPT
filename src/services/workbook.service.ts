@@ -8,6 +8,10 @@ class WorkbookService {
     return raw ? (JSON.parse(raw) as WorkbookConfig[]) : [];
   }
 
+  listByUser(userId: string): WorkbookConfig[] {
+    return this.list().filter((w) => w.ownerUserId === userId);
+  }
+
   save(workbook: WorkbookConfig): WorkbookConfig {
     const list = this.list();
     const idx = list.findIndex((w) => w.workbookId === workbook.workbookId);

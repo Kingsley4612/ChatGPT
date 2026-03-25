@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { viewSaveService } from '../../features/view-save/viewSave.service';
 import { workbookService } from '../../services/workbook.service';
+import { useSecurity } from '../../features/security/useSecurity';
 
 interface Props {
   onBack: () => void;
@@ -8,8 +9,9 @@ interface Props {
 
 export function MyAnalysisPage({ onBack }: Props) {
   const [refreshKey, setRefreshKey] = useState(0);
-  const views = useMemo(() => viewSaveService.list(), [refreshKey]);
-  const workbooks = useMemo(() => workbookService.list(), [refreshKey]);
+  const { user } = useSecurity();
+  const views = useMemo(() => viewSaveService.listByUser(user.userId), [refreshKey, user.userId]);
+  const workbooks = useMemo(() => workbookService.listByUser(user.userId), [refreshKey, user.userId]);
 
   return (
     <div style={{ padding: 16 }}>

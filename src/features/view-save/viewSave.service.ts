@@ -8,6 +8,10 @@ class ViewSaveService {
     return raw ? (JSON.parse(raw) as ViewConfig[]) : [];
   }
 
+  listByUser(userId: string): ViewConfig[] {
+    return this.list().filter((v) => v.ownerUserId === userId);
+  }
+
   save(view: ViewConfig): ViewConfig {
     const list = this.list();
     const idx = list.findIndex((v) => v.viewId === view.viewId);

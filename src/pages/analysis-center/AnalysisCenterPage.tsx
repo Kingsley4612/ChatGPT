@@ -3,6 +3,7 @@ import { datasetService } from '../../services/dataset.service';
 import { viewSaveService } from '../../features/view-save/viewSave.service';
 import { workbookService } from '../../services/workbook.service';
 import type { DatasetMeta, ViewConfig, WorkbookConfig } from '../../types/models';
+import { useSecurity } from '../../features/security/useSecurity';
 
 interface Props {
   onOpenDataset: (datasetId: string) => void;
@@ -13,12 +14,13 @@ export function AnalysisCenterPage({ onOpenDataset, onOpenMyAnalysis }: Props) {
   const [datasets, setDatasets] = useState<DatasetMeta[]>([]);
   const [views, setViews] = useState<ViewConfig[]>([]);
   const [workbooks, setWorkbooks] = useState<WorkbookConfig[]>([]);
+  const { user } = useSecurity();
 
   useEffect(() => {
     datasetService.listDatasets().then(setDatasets);
-    setViews(viewSaveService.list().slice(0, 5));
-    setWorkbooks(workbookService.list().slice(0, 5));
-  }, []);
+    setViews(viewSaveService.listByUser(user.userId).slice(0, 5));
+    setWorkbooks(workbookService.listByUser(user.userId).slice(0, 5));
+  }, [user.userId]);
 
   return (
     <div style={{ padding: 16 }}>

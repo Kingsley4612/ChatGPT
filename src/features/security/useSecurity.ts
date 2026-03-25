@@ -1,8 +1,8 @@
-import { mockSecurityConfig, mockUserContext } from '../../services/security.service';
+import { getCurrentUser, mockSecurityConfig } from '../../services/security.service';
 
 export function useSecurity() {
   return {
-    user: mockUserContext,
+    user: getCurrentUser(),
     security: mockSecurityConfig,
   };
 }

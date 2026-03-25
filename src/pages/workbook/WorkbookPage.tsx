@@ -23,7 +23,7 @@ interface SheetState {
   grid: UniverGridState;
 }
 
-const SHEETS = ['明细', '分析'];
+const SHEETS = ['明细(原始数据)', '分析(编辑与计算)'];
 
 function evaluateFormula(formula: string, row: Record<string, unknown>): unknown {
   const normalized = formula.trim().toUpperCase();
@@ -212,6 +212,8 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
               if (!viewName) return;
               viewSaveService.save({
                 viewId: crypto.randomUUID(),
+                ownerUserId: user.userId,
+                ownerOrg: user.department,
                 name: viewName,
                 datasetId,
                 filters,
@@ -232,6 +234,8 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
               const id = workbookId ?? crypto.randomUUID();
               workbookService.save({
                 workbookId: id,
+                ownerUserId: user.userId,
+                ownerOrg: user.department,
                 name,
                 datasetId,
                 sheets: sheetStates.map((sheet, index) => ({
@@ -264,6 +268,8 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
               setWorkbookId(id);
               workbookService.save({
                 workbookId: id,
+                ownerUserId: user.userId,
+                ownerOrg: user.department,
                 name,
                 datasetId,
                 sheets: sheetStates.map((sheet, index) => ({
@@ -427,7 +433,11 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
             <span> 当前第 {page + 1} 页 / 总行数 {meta.totalRows.toLocaleString()} </span>
           </div>
 
-          <div className="card" style={{ marginTop: 8, display: 'flex', gap: 8 }}>
+          <div className="card" style={{ marginTop: 8 }}>
+            <div style={{ fontSize: 12, color: '#64748b', marginBottom: 6 }}>
+              Sheet 说明：<strong>明细</strong>用于看原始数据；<strong>分析</strong>用于做编辑与公式试算。
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
             {SHEETS.map((sheetName) => (
               <button
                 key={sheetName}
@@ -440,6 +450,7 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
                 {sheetName}
               </button>
             ))}
+            </div>
           </div>
 
           <footer className="card" style={{ marginTop: 8 }}>

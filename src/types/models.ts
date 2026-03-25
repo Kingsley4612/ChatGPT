@@ -77,6 +77,8 @@ export interface AuditEvent {
 
 export interface ViewConfig {
   viewId: string;
+  ownerUserId: string;
+  ownerOrg: string;
   name: string;
   datasetId: string;
   filters: Record<string, string | number | boolean>;
@@ -94,6 +96,8 @@ export interface ViewConfig {
 
 export interface WorkbookConfig {
   workbookId: string;
+  ownerUserId: string;
+  ownerOrg: string;
   name: string;
   datasetId: string;
   sheets: Array<{
