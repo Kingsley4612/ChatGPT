@@ -12,6 +12,10 @@ class WorkbookService {
     return this.list().filter((w) => w.ownerUserId === userId);
   }
 
+  getById(workbookId: string): WorkbookConfig | null {
+    return this.list().find((w) => w.workbookId === workbookId) ?? null;
+  }
+
   save(workbook: WorkbookConfig): WorkbookConfig {
     const list = this.list();
     const idx = list.findIndex((w) => w.workbookId === workbook.workbookId);

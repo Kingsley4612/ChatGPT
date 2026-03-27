@@ -104,7 +104,12 @@ export interface WorkbookConfig {
     sheetId: string;
     name: string;
     viewConfig: Omit<ViewConfig, 'viewId' | 'name' | 'datasetId' | 'createdAt'>;
-    formulaColumns: Array<{ fieldName: string; formula: string }>;
+    formulaColumns?: Array<{ fieldName: string; formula: string }>;
+    sheetFields?: DatasetField[];
+    customColumns?: DatasetField[];
+    removedColumns?: string[];
+    rowSnapshot?: Record<string, unknown>[];
+    cellColors?: Record<string, string>;
   }>;
   createdAt: string;
   updatedAt: string;

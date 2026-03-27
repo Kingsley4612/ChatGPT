@@ -1,21 +1,30 @@
 :root {
-  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  color: #1f2937;
-  background: linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%);
+  font-family: 'SF Pro Display', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+  color: #172033;
+  background:
+    radial-gradient(circle at top left, rgba(244, 114, 76, 0.16), transparent 22%),
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.14), transparent 26%),
+    linear-gradient(180deg, #f6f7fb 0%, #edf2f7 100%);
 }
 
 body {
   margin: 0;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
 }
 
 button {
-  background: linear-gradient(135deg, #2563eb, #1d4ed8);
+  background: linear-gradient(135deg, #0f766e, #115e59);
   color: white;
   border: none;
-  border-radius: 10px;
-  padding: 7px 12px;
+  border-radius: 12px;
+  padding: 8px 12px;
   cursor: pointer;
-  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.28);
+  box-shadow: 0 10px 24px rgba(15, 118, 110, 0.18);
+  transition: transform 0.16s ease, box-shadow 0.16s ease, opacity 0.16s ease;
 }
 
 button:hover {
@@ -31,17 +40,20 @@ button:disabled {
 input,
 select {
   border: 1px solid #d1d5db;
-  border-radius: 8px;
-  padding: 6px 8px;
+  border-radius: 10px;
+  padding: 8px 10px;
   background: #fff;
+  min-height: 38px;
+  box-sizing: border-box;
 }
 
 .card {
-  background: rgba(255, 255, 255, 0.94);
-  border-radius: 14px;
-  box-shadow: 0 6px 24px rgba(15, 23, 42, 0.08);
+  background: rgba(255, 255, 255, 0.9);
+  border-radius: 18px;
+  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.08);
   padding: 12px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid rgba(226, 232, 240, 0.85);
+  backdrop-filter: blur(10px);
 }
 
 .toast {
@@ -53,4 +65,395 @@ select {
   border-radius: 10px;
   padding: 10px 14px;
   z-index: 20;
+}
+
+.app-shell {
+  min-height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 24px;
+  background: rgba(9, 14, 29, 0.88);
+  color: white;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  backdrop-filter: blur(12px);
+}
+
+.topbar-title {
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.page-shell {
+  max-width: min(1760px, calc(100vw - 20px));
+  margin: 0 auto;
+  padding: 14px 14px 16px;
+}
+
+.page-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.8fr);
+  gap: 12px;
+}
+
+.hero-panel h2,
+.page-heading h2 {
+  margin: 0;
+}
+
+.stats-panel,
+.login-highlights,
+.inline-actions,
+.action-cluster,
+.toolbar-section {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.metric-card {
+  min-width: 120px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(15, 118, 110, 0.08), rgba(15, 118, 110, 0.02));
+  border: 1px solid rgba(15, 118, 110, 0.12);
+}
+
+.metric-card strong {
+  display: block;
+  font-size: 20px;
+  margin-bottom: 4px;
+}
+
+.muted {
+  color: #667085;
+  font-size: 13px;
+}
+
+.eyebrow {
+  color: #0f766e;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+
+.button-secondary {
+  background: linear-gradient(135deg, #334155, #1e293b);
+  box-shadow: none;
+}
+
+.list-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.list-item-button {
+  text-align: left;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+}
+
+.result-list {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.asset-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid #edf2f7;
+}
+
+.asset-row:last-child {
+  border-bottom: none;
+}
+
+.link-button {
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #0f766e;
+  box-shadow: none;
+}
+
+.link-button--strong {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.toolbar-card {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 8px;
+  align-items: start;
+}
+
+.toolbar-title-block {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+.toolbar-section--grow input {
+  flex: 1 1 260px;
+}
+
+.file-trigger {
+  border: 1px dashed #94a3b8;
+  padding: 8px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+  color: #0f172a;
+  background: #fff;
+}
+
+.file-trigger.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.workbook-page .card {
+  overflow: hidden;
+}
+
+.workbook-grid-shell {
+  max-height: calc(100vh - 245px);
+  min-height: calc(100vh - 315px);
+  position: relative;
+}
+
+.workbook-grid-pane--frozen {
+  overflow: hidden !important;
+  scrollbar-width: none;
+}
+
+.workbook-grid-pane--frozen::-webkit-scrollbar {
+  display: none;
+  height: 0;
+  width: 0;
+}
+
+.workbook-header-editor {
+  position: fixed;
+  z-index: 30;
+  border: 2px solid #2563eb;
+  border-radius: 4px;
+  min-height: 0;
+  padding: 0 10px;
+  margin: 0;
+  box-shadow: 0 8px 24px rgba(37, 99, 235, 0.18);
+  background: #fff;
+  font-size: 13px;
+  line-height: 1.2;
+  box-sizing: border-box;
+}
+
+.workbook-cell-editor {
+  border-color: #2563eb;
+}
+
+.workbook-grid th,
+.workbook-grid td {
+  font-size: 13px;
+}
+
+.workbook-grid th {
+  background: #f3f8ff;
+}
+
+.workbook-corner-cell,
+.workbook-row-index,
+.workbook-row-selected {
+  width: 54px;
+  min-width: 54px;
+  max-width: 54px;
+  position: sticky;
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+}
+
+.workbook-header-selected,
+.workbook-row-selected {
+  background: #dbeafe !important;
+}
+
+.header-select-button,
+.row-select-button {
+  width: 100%;
+  padding: 0;
+  background: transparent;
+  color: #0f172a;
+  box-shadow: none;
+  border-radius: 0;
+  text-align: left;
+  font-weight: 600;
+}
+
+.row-select-button {
+  text-align: center;
+}
+
+.icon-button {
+  min-width: 28px;
+  padding: 4px 8px;
+}
+
+.workbook-footer-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.workbook-utility-bar,
+.workbook-filter-bar {
+  gap: 10px;
+}
+
+.workbook-formula-bar {
+  display: grid;
+  grid-template-columns: 128px 40px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.workbook-name-box,
+.workbook-formula-input {
+  min-height: 42px;
+  font-size: 14px;
+}
+
+.workbook-name-box {
+  text-transform: uppercase;
+  text-align: center;
+  font-weight: 600;
+}
+
+.workbook-fx-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+  border-radius: 12px;
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  color: #334155;
+  font-weight: 700;
+  font-style: italic;
+}
+
+.column-manager-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.column-manager-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+}
+
+.column-manager-chip.is-visible {
+  background: #ecfeff;
+  border-color: #67e8f9;
+}
+
+.color-chip {
+  min-width: 40px;
+  padding: 6px 10px;
+  border-radius: 999px;
+}
+
+.login-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(320px, 420px);
+  gap: 20px;
+  align-items: stretch;
+  padding: 24px;
+}
+
+.login-panel {
+  min-height: 260px;
+}
+
+.login-panel--hero {
+  padding: 32px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.login-panel--hero h1 {
+  font-size: clamp(34px, 5vw, 56px);
+  line-height: 0.95;
+  margin: 0 0 16px;
+}
+
+.login-panel--form {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 10px;
+}
+
+.form-error {
+  color: #b42318;
+  background: #fef3f2;
+  border: 1px solid #fecdca;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+@media (max-width: 960px) {
+  .hero-grid,
+  .login-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .page-heading,
+  .topbar,
+  .asset-row,
+  .workbook-footer-bar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .workbook-grid-shell {
+    min-height: 420px;
+  }
+
+  .workbook-formula-bar {
+    grid-template-columns: 1fr;
+  }
 }

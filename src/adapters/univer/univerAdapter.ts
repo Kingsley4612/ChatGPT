@@ -24,7 +24,7 @@ export class UniverAdapter {
     this.initialState = {
       hiddenColumns: [],
       columnWidths: Object.fromEntries(options.fields.map((f) => [f.fieldName, 140])),
-      freeze: { row: 1, col: 1 },
+      freeze: { row: 0, col: 0 },
       activeSheet: options.sheets[0] ?? 'Sheet1',
     };
   }

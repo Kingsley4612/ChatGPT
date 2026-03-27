@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { CompactSelection, type GridSelection } from '@glideapps/glide-data-grid';
 import { WorkbookShell } from '../../components/workbook-shell/WorkbookShell';
 import { Toolbar } from '../../components/toolbar/Toolbar';
 import { SecurityGuard } from '../../components/security-guard/SecurityGuard';
@@ -6,61 +7,303 @@ import { Watermark } from '../../components/watermark/Watermark';
 import { useDataset } from '../../features/dataset/useDataset';
 import { useSecurity } from '../../features/security/useSecurity';
 import { buildWatermarkText } from '../../services/security.service';
+import { evaluateFormulaRows } from '../../services/formula.service';
 import { maskValue } from '../../utils/mask';
 import { UniverAdapter, type UniverGridState } from '../../adapters/univer/univerAdapter';
 import { viewSaveService } from '../../features/view-save/viewSave.service';
 import { workbookService } from '../../services/workbook.service';
 import { useAudit } from '../../features/audit/useAudit';
-import { datasetService } from '../../services/dataset.service';
+import {
+  BLANK_DATASET_ID,
+  DEFAULT_BLANK_ROW_COUNT,
+  createBlankFields,
+  createBlankRows,
+  datasetService,
+  getColumnLabel,
+} from '../../services/dataset.service';
+import type { DatasetField, WorkbookConfig } from '../../types/models';
 
 interface Props {
   datasetId: string;
+  workbookId?: string;
   onBack: () => void;
 }
 
-interface SheetState {
-  name: string;
-  grid: UniverGridState;
+interface ActiveCellState {
+  columnIndex: number;
+  rowIndex: number;
+  field: DatasetField;
+  label: string;
+  value: string;
 }
 
-const SHEETS = ['明细(原始数据)', '分析(编辑与计算)'];
+interface FormulaEditTarget {
+  rowIndex: number;
+  fieldName: string;
+  label: string;
+  value: string;
+}
 
-function evaluateFormula(formula: string, row: Record<string, unknown>): unknown {
-  const normalized = formula.trim().toUpperCase();
-  if (normalized.startsWith('=ROUND(')) {
-    const raw = formula.slice(formula.indexOf('(') + 1, formula.lastIndexOf(')'));
-    const [field, digits] = raw.split(',').map((x) => x.trim());
-    const v = Number(row[field] ?? 0);
-    const d = Number(digits ?? 0);
-    return Number.isNaN(v) ? '' : Number(v.toFixed(d));
+interface TextSelectionRange {
+  start: number;
+  end: number;
+}
+
+const WORKSHEET_NAME = '工作表';
+const LEGACY_ROW_TITLE_FIELD_NAME = '__rowTitle';
+const PAGE_SIZE = 100;
+const HEADER_ROW_INDEX = 0;
+const DATA_ROW_OFFSET = 1;
+const CELL_COLOR_OPTIONS = [
+  { label: '黄', value: '#fde68a' },
+  { label: '绿', value: '#bbf7d0' },
+  { label: '蓝', value: '#bfdbfe' },
+  { label: '粉', value: '#fbcfe8' },
+  { label: '紫', value: '#ddd6fe' },
+] as const;
+
+function createEmptyGridSelection(): GridSelection {
+  return {
+    columns: CompactSelection.empty(),
+    rows: CompactSelection.empty(),
+  };
+}
+
+function createCellGridSelection(columnIndex: number, rowIndex: number): GridSelection {
+  return {
+    current: {
+      cell: [columnIndex, rowIndex],
+      range: { x: columnIndex, y: rowIndex, width: 1, height: 1 },
+      rangeStack: [],
+    },
+    columns: CompactSelection.empty(),
+    rows: CompactSelection.empty(),
+  };
+}
+
+function cloneFields(fields: DatasetField[]): DatasetField[] {
+  return fields.map((field) => ({ ...field }));
+}
+
+function buildHeaderRow(fields: DatasetField[]): Record<string, unknown> {
+  return Object.fromEntries(fields.map((field) => [field.fieldName, field.title]));
+}
+
+function isHeaderRowIndex(rowIndex: number): boolean {
+  return rowIndex === HEADER_ROW_INDEX;
+}
+
+function toDataRowIndex(rowIndex: number): number {
+  return rowIndex - DATA_ROW_OFFSET;
+}
+
+function toVisualRowIndex(rowIndex: number): number {
+  return rowIndex + DATA_ROW_OFFSET;
+}
+
+function normalizeBlankWorkbookFields(fields: DatasetField[]): DatasetField[] {
+  const isLegacyDefaultBlankSheet = fields.length > 0 && fields.every((field, index) => {
+    const label = getColumnLabel(index);
+    return field.fieldName === `col_${label}` && field.title.trim() === label;
+  });
+
+  if (!isLegacyDefaultBlankSheet) {
+    return fields;
   }
-  return '#N/A';
+
+  return fields.map((field) => ({ ...field, title: '' }));
 }
 
-export function WorkbookPage({ datasetId, onBack }: Props) {
+function isSupportedField(fieldName: string): boolean {
+  return fieldName !== LEGACY_ROW_TITLE_FIELD_NAME;
+}
+
+function sanitizeLegacyRows(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  return rows.map((row) => {
+    const { [LEGACY_ROW_TITLE_FIELD_NAME]: _, ...rest } = row;
+    return rest;
+  });
+}
+
+function createGridState(fields: DatasetField[]): UniverGridState {
+  return {
+    hiddenColumns: [],
+    columnWidths: Object.fromEntries(fields.map((field) => [field.fieldName, 140])),
+    freeze: { row: 0, col: 0 },
+    activeSheet: WORKSHEET_NAME,
+  };
+}
+
+function normalizeSearchValue(value: unknown): string {
+  return String(value ?? '').trim().toLowerCase();
+}
+
+function fuzzyMatch(text: unknown, query: string): boolean {
+  const source = normalizeSearchValue(text);
+  const normalizedQuery = normalizeSearchValue(query);
+
+  if (!normalizedQuery) return true;
+  if (source.includes(normalizedQuery)) return true;
+
+  let queryIndex = 0;
+  for (let index = 0; index < source.length && queryIndex < normalizedQuery.length; index += 1) {
+    if (source[index] === normalizedQuery[queryIndex]) {
+      queryIndex += 1;
+    }
+  }
+
+  return queryIndex === normalizedQuery.length;
+}
+
+function fuzzyMatchTokens(text: unknown, query: string): boolean {
+  return query
+    .split(/\s+/)
+    .filter(Boolean)
+    .every((token) => fuzzyMatch(text, token));
+}
+
+function uniqueFieldName(baseName: string, existingFieldNames: Set<string>): string {
+  let nextName = baseName;
+  let suffix = 1;
+  while (existingFieldNames.has(nextName)) {
+    suffix += 1;
+    nextName = `${baseName}_${suffix}`;
+  }
+  existingFieldNames.add(nextName);
+  return nextName;
+}
+
+function buildFieldFromTitle(title: string, existingFieldNames: Set<string>, fallbackIndex: number): DatasetField {
+  const normalized = title.trim();
+  const baseName = (normalized || `column_${fallbackIndex + 1}`)
+    .replace(/\s+/g, '_')
+    .replace(/[^\p{L}\p{N}_]/gu, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    || `column_${fallbackIndex + 1}`;
+
+  return {
+    fieldName: uniqueFieldName(baseName, existingFieldNames),
+    title: normalized,
+    type: 'string',
+    sortable: true,
+    filterable: true,
+    sensitive: false,
+  };
+}
+
+function createEmptyRow(fields: DatasetField[]): Record<string, unknown> {
+  return Object.fromEntries(fields.map((field) => [field.fieldName, '']));
+}
+
+function createFormulaEditTarget(cell: ActiveCellState | null): FormulaEditTarget | null {
+  if (!cell) return null;
+
+  return {
+    rowIndex: cell.rowIndex,
+    fieldName: cell.field.fieldName,
+    label: cell.label,
+    value: cell.value,
+  };
+}
+
+function insertReferenceAtSelection(value: string, reference: string, selection: TextSelectionRange): { value: string; caret: number } {
+  const start = Math.max(0, Math.min(selection.start, value.length));
+  const end = Math.max(start, Math.min(selection.end, value.length));
+
+  return {
+    value: `${value.slice(0, start)}${reference}${value.slice(end)}`,
+    caret: start + reference.length,
+  };
+}
+
+function insertItems<T>(items: T[], insertIndex: number, newItems: T[]): T[] {
+  return [...items.slice(0, insertIndex), ...newItems, ...items.slice(insertIndex)];
+}
+
+function parseCellReference(value: string): { col: number; row: number } | null {
+  const match = value.trim().toUpperCase().match(/^([A-Z]+)(\d+)$/);
+  if (!match) return null;
+
+  let columnIndex = 0;
+  const label = match[1];
+  for (let index = 0; index < label.length; index += 1) {
+    columnIndex = columnIndex * 26 + (label.charCodeAt(index) - 64);
+  }
+
+  return {
+    col: columnIndex - 1,
+    row: Number(match[2]) - 1,
+  };
+}
+
+function toEditableCellValue(row: Record<string, unknown> | undefined, fieldName: string): string {
+  return row?.[fieldName] == null ? '' : String(row[fieldName]);
+}
+
+function deriveLegacyFields(
+  savedSheet: WorkbookConfig['sheets'][number] | null | undefined,
+  fallbackFields: DatasetField[],
+): DatasetField[] {
+  if (savedSheet?.sheetFields?.length) {
+    return cloneFields(savedSheet.sheetFields).filter((field) => isSupportedField(field.fieldName));
+  }
+
+  if (savedSheet?.rowSnapshot?.length) {
+    const existingFieldNames = new Set<string>();
+    return Object.keys(savedSheet.rowSnapshot[0])
+      .filter(isSupportedField)
+      .map((fieldName, index) => buildFieldFromTitle(fieldName, existingFieldNames, index));
+  }
+
+  const baseFields = fallbackFields.filter(
+    (field) => isSupportedField(field.fieldName) && !savedSheet?.removedColumns?.includes(field.fieldName),
+  );
+  const customFields = (savedSheet?.customColumns ?? []).filter(
+    (field) => isSupportedField(field.fieldName) && !savedSheet?.removedColumns?.includes(field.fieldName),
+  );
+  return cloneFields([...baseFields, ...customFields]);
+}
+
+export function WorkbookPage(props: Props) {
+  const { datasetId, onBack } = props;
+  const initialWorkbookId = props.workbookId;
+  const isBlankWorkbook = datasetId === BLANK_DATASET_ID;
+
   const [page, setPage] = useState(0);
-  const [refreshKey, setRefreshKey] = useState(0);
+  const [refreshKey] = useState(0);
   const [keyword, setKeyword] = useState('');
   const [sortBy, setSortBy] = useState<string>();
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
   const [filters, setFilters] = useState<Record<string, string>>({});
-  const [workbookName, setWorkbookName] = useState('临时工作簿');
+  const [workbookName, setWorkbookName] = useState(isBlankWorkbook ? '空白工作簿' : '临时工作簿');
   const [workbookId, setWorkbookId] = useState<string | null>(null);
-  const [activeSheet, setActiveSheet] = useState(SHEETS[0]);
-  const [formula, setFormula] = useState('=ROUND(amount,2)');
-  const [formulaError, setFormulaError] = useState<string | null>(null);
-  const [selectedCells, setSelectedCells] = useState<Set<string>>(new Set());
+  const [sheetFields, setSheetFields] = useState<DatasetField[]>([]);
+  const [gridSelection, setGridSelection] = useState<GridSelection>(() => createEmptyGridSelection());
   const [toast, setToast] = useState<string | null>(null);
-  const [editedRows, setEditedRows] = useState<Record<string, unknown>[] | null>(null);
-  const [addedRows, setAddedRows] = useState<Record<string, unknown>[]>([]);
-  const [customColumns, setCustomColumns] = useState<Array<{ fieldName: string; title: string }>>([]);
-  const [selectedWidthField, setSelectedWidthField] = useState('orderId');
+  const [workingRows, setWorkingRows] = useState<Record<string, unknown>[]>([]);
+  const [snapshotRows, setSnapshotRows] = useState<Record<string, unknown>[] | null>(isBlankWorkbook ? [] : null);
+  const [gridState, setGridState] = useState<UniverGridState | null>(null);
+  const [selectedColor, setSelectedColor] = useState<string>(CELL_COLOR_OPTIONS[0].value);
+  const [cellColors, setCellColors] = useState<Record<string, string>>({});
+  const [initializedKey, setInitializedKey] = useState('');
+  const [showColumnManager, setShowColumnManager] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
+  const [formulaInput, setFormulaInput] = useState('');
+  const [nameBoxInput, setNameBoxInput] = useState('');
+  const [formulaTarget, setFormulaTarget] = useState<FormulaEditTarget | null>(null);
+  const [isFormulaEditing, setIsFormulaEditing] = useState(false);
+  const [isFormulaDirty, setIsFormulaDirty] = useState(false);
+  const [scrollTarget, setScrollTarget] = useState<{ col: number; row: number; token: number } | null>(null);
+  const formulaInputRef = useRef<HTMLInputElement>(null);
+  const formulaInputSelectionRef = useRef<TextSelectionRange>({ start: 0, end: 0 });
+  const pendingFormulaReferencePickRef = useRef(false);
 
   const { user, security } = useSecurity();
-  const { emit } = useAudit(datasetId);
+  const { emit } = useAudit(datasetId, workbookId ?? undefined);
   const { meta, page: pageData, loading, error } = useDataset(datasetId, {
     page,
-    pageSize: 100,
+    pageSize: PAGE_SIZE,
     keyword,
     sortBy,
     sortOrder,
@@ -68,17 +311,91 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
     reloadKey: refreshKey,
   });
 
+  const adapterFields = sheetFields.length ? sheetFields : meta?.fields ?? [];
   const adapter = useMemo(() => {
-    if (!meta) return null;
-    return new UniverAdapter({ fields: meta.fields, sheets: SHEETS });
-  }, [meta]);
-
-  const [sheetStates, setSheetStates] = useState<SheetState[]>([]);
+    if (!adapterFields.length && !meta) return null;
+    return new UniverAdapter({ fields: adapterFields, sheets: [WORKSHEET_NAME] });
+  }, [adapterFields, meta]);
 
   useEffect(() => {
-    if (!adapter) return;
-    setSheetStates(SHEETS.map((name) => ({ name, grid: adapter.initialState })));
-  }, [adapter]);
+    if (!meta) return;
+
+    const routeKey = `${datasetId}:${initialWorkbookId ?? 'new'}`;
+    if (initializedKey === routeKey) return;
+
+    const savedWorkbook = initialWorkbookId ? workbookService.getById(initialWorkbookId) : null;
+    const savedSheet = savedWorkbook?.sheets[0] ?? null;
+
+    if (!savedWorkbook || !savedSheet) {
+      const initialFields = isBlankWorkbook
+        ? cloneFields(meta.fields.length ? meta.fields : createBlankFields())
+        : cloneFields(meta.fields);
+      setWorkbookId(null);
+      setWorkbookName(isBlankWorkbook ? '空白工作簿' : '临时工作簿');
+      setFilters({});
+      setSortBy(undefined);
+      setSortOrder('asc');
+      setPage(0);
+      setSheetFields(initialFields);
+      setWorkingRows([]);
+      setSnapshotRows(isBlankWorkbook ? createBlankRows(DEFAULT_BLANK_ROW_COUNT, initialFields) : null);
+      setGridState(createGridState(initialFields));
+      setCellColors({});
+      setInitializedKey(routeKey);
+      return;
+    }
+
+    const initialFields = isBlankWorkbook
+      ? normalizeBlankWorkbookFields(deriveLegacyFields(savedSheet, meta.fields))
+      : deriveLegacyFields(savedSheet, meta.fields);
+    setWorkbookId(savedWorkbook.workbookId);
+    setWorkbookName(savedWorkbook.name);
+    setFilters(
+      Object.fromEntries(
+        Object.entries(savedSheet.viewConfig.filters).map(([fieldName, value]) => [fieldName, String(value ?? '')]),
+      ),
+    );
+    setSortBy(savedSheet.viewConfig.sortBy);
+    setSortOrder(savedSheet.viewConfig.sortOrder ?? 'asc');
+    setPage(0);
+    setSheetFields(initialFields);
+    setWorkingRows([]);
+    setSnapshotRows(
+      savedSheet.rowSnapshot
+        ? sanitizeLegacyRows(savedSheet.rowSnapshot)
+        : isBlankWorkbook
+          ? createBlankRows(DEFAULT_BLANK_ROW_COUNT, initialFields)
+          : null,
+    );
+    setGridState({
+      hiddenColumns: initialFields
+        .map((field) => field.fieldName)
+        .filter((fieldName) => !savedSheet.viewConfig.visibleColumns.includes(fieldName)),
+      columnWidths: {
+        ...createGridState(initialFields).columnWidths,
+        ...savedSheet.viewConfig.columnWidths,
+      },
+      freeze: savedSheet.viewConfig.freeze,
+      activeSheet: WORKSHEET_NAME,
+    });
+    setCellColors(savedSheet.cellColors ?? {});
+    setInitializedKey(routeKey);
+  }, [datasetId, initialWorkbookId, initializedKey, isBlankWorkbook, meta]);
+
+  const isSnapshotMode = snapshotRows !== null;
+
+  useEffect(() => {
+    if (isSnapshotMode) return;
+    setWorkingRows(sanitizeLegacyRows(pageData?.rows ?? []));
+  }, [isSnapshotMode, pageData]);
+
+  useEffect(() => {
+    emit('open_dataset', { datasetId });
+  }, [datasetId, emit]);
+
+  useEffect(() => {
+    setGridSelection(createEmptyGridSelection());
+  }, [page, keyword, sortBy, sortOrder, JSON.stringify(filters), snapshotRows?.length, sheetFields.length]);
 
   useEffect(() => {
     if (!toast) return;
@@ -86,123 +403,632 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
     return () => clearTimeout(timer);
   }, [toast]);
 
-  const activeSheetState = sheetStates.find((s) => s.name === activeSheet) ?? sheetStates[0];
+  const snapshotViewport = useMemo(() => {
+    if (snapshotRows === null) return null;
+
+    let rows = snapshotRows.map((row, index) => ({ row, sourceIndex: index }));
+
+    if (keyword) {
+      rows = rows.filter((item) => fuzzyMatchTokens(Object.values(item.row).join(' '), keyword));
+    }
+
+    Object.entries(filters).forEach(([fieldName, value]) => {
+      if (!value) return;
+      rows = rows.filter((item) => fuzzyMatchTokens(item.row[fieldName], value));
+    });
+
+    if (sortBy) {
+      const collator = new Intl.Collator('zh-Hans-CN', { numeric: true });
+      rows = [...rows].sort((left, right) => {
+        const result = collator.compare(String(left.row[sortBy] ?? ''), String(right.row[sortBy] ?? ''));
+        return sortOrder === 'desc' ? -result : result;
+      });
+    }
+
+    const start = isSnapshotMode ? 0 : page * PAGE_SIZE;
+    const pageRows = isSnapshotMode ? rows : rows.slice(start, start + PAGE_SIZE);
+    return {
+      rows: pageRows.map((item) => item.row),
+      sourceIndexes: pageRows.map((item) => item.sourceIndex),
+      totalRows: rows.length,
+      hasMore: isSnapshotMode ? false : start + PAGE_SIZE < rows.length,
+    };
+  }, [filters, isSnapshotMode, keyword, page, snapshotRows, sortBy, sortOrder]);
+
+  const activeRows = snapshotViewport?.rows ?? workingRows;
+  const activeSourceIndexes = snapshotViewport?.sourceIndexes ?? [];
+  const visibleFields = useMemo(
+    () => sheetFields.filter((field) => !gridState?.hiddenColumns.includes(field.fieldName)),
+    [gridState?.hiddenColumns, sheetFields],
+  );
+
+  const selectedRows = useMemo(() => new Set(gridSelection.rows.toArray()), [gridSelection.rows]);
+
+  const selectedColumns = useMemo(
+    () =>
+      new Set(
+        gridSelection.columns
+          .toArray()
+          .map((columnIndex) => visibleFields[columnIndex]?.fieldName)
+          .filter((fieldName): fieldName is string => Boolean(fieldName)),
+      ),
+    [gridSelection.columns, visibleFields],
+  );
+
+  const selectedCells = useMemo(() => {
+    const next = new Set<string>();
+    const rectangles = gridSelection.current
+      ? [gridSelection.current.range, ...gridSelection.current.rangeStack]
+      : [];
+
+    rectangles.forEach((range) => {
+      for (let rowIndex = range.y; rowIndex < range.y + range.height; rowIndex += 1) {
+        for (let columnIndex = range.x; columnIndex < range.x + range.width; columnIndex += 1) {
+          const field = visibleFields[columnIndex];
+          if (field) {
+            next.add(`${rowIndex}:${field.fieldName}`);
+          }
+        }
+      }
+    });
+
+    return next;
+  }, [gridSelection.current, visibleFields]);
+
+  const primarySelectedFieldName = useMemo(() => {
+    const firstSelected = selectedColumns.values().next().value;
+    if (firstSelected) return firstSelected;
+    const activeColumnIndex = gridSelection.current?.cell[0];
+    return activeColumnIndex == null ? null : (visibleFields[activeColumnIndex]?.fieldName ?? null);
+  }, [gridSelection.current, selectedColumns, visibleFields]);
+
+  const primarySelectedRowIndex = useMemo(() => {
+    const firstSelected = selectedRows.values().next().value;
+    if (typeof firstSelected === 'number') return firstSelected;
+    return gridSelection.current?.cell[1] ?? null;
+  }, [gridSelection.current, selectedRows]);
+
+  const headerRow = useMemo(() => buildHeaderRow(sheetFields), [sheetFields]);
+  const visibleRowCount = activeRows.length + DATA_ROW_OFFSET;
+
+  const activeCell = useMemo<ActiveCellState | null>(() => {
+    const currentCell = gridSelection.current?.cell;
+    if (!currentCell) return null;
+
+    const [columnIndex, rowIndex] = currentCell;
+    const field = visibleFields[columnIndex];
+    if (!field || rowIndex < 0 || rowIndex >= visibleRowCount) return null;
+
+    return {
+      columnIndex,
+      rowIndex,
+      field,
+      label: `${getColumnLabel(columnIndex)}${rowIndex + 1}`,
+      value: isHeaderRowIndex(rowIndex)
+        ? String(headerRow[field.fieldName] ?? '')
+        : toEditableCellValue(activeRows[toDataRowIndex(rowIndex)], field.fieldName),
+    };
+  }, [activeRows, gridSelection.current, headerRow, visibleFields, visibleRowCount]);
+
+  const isFormulaReferenceMode = isFormulaEditing && formulaInput.trim().startsWith('=');
+
+  const updateFormulaInputSelection = (input: HTMLInputElement | null = formulaInputRef.current) => {
+    if (!input) return;
+
+    const fallback = input.value.length;
+    formulaInputSelectionRef.current = {
+      start: input.selectionStart ?? fallback,
+      end: input.selectionEnd ?? fallback,
+    };
+  };
+
+  const focusFormulaInputAtCaret = (caret: number) => {
+    requestAnimationFrame(() => {
+      const input = formulaInputRef.current;
+      if (!input) return;
+
+      input.focus();
+      input.setSelectionRange(caret, caret);
+      formulaInputSelectionRef.current = {
+        start: caret,
+        end: caret,
+      };
+    });
+  };
 
   useEffect(() => {
-    emit('open_dataset', { datasetId });
-  }, [datasetId, emit]);
+    if (isFormulaEditing) return;
+    setFormulaInput(activeCell?.value ?? '');
+    setNameBoxInput(activeCell?.label ?? '');
+    setFormulaTarget(createFormulaEditTarget(activeCell));
+    setIsFormulaDirty(false);
+  }, [activeCell, isFormulaEditing]);
 
-  useEffect(() => {
-    setEditedRows(null);
-    setAddedRows([]);
-  }, [pageData]);
-
-  const baseRows = editedRows ?? pageData?.rows ?? [];
-  const rawRows = [...baseRows, ...addedRows];
-
-  const rowsWithFormula = useMemo(() => {
-    return rawRows.map((row) => ({ ...row, calc_col: evaluateFormula(formula, row) }));
-  }, [rawRows, formula]);
+  const displayRows = useMemo(() => {
+    return evaluateFormulaRows(activeRows, sheetFields);
+  }, [activeRows, sheetFields]);
 
   const maskedRows = useMemo(() => {
-    if (!meta || !rowsWithFormula.length) return [];
-    return rowsWithFormula.map((row) => {
+    if (!meta || !displayRows.length) return displayRows;
+    const metaFieldMap = new Map(meta.fields.map((field) => [field.fieldName, field]));
+
+    return displayRows.map((row) => {
       const next = { ...row };
-      meta.fields.forEach((field) => {
-        if (security.enableMasking) {
-          next[field.fieldName] = maskValue(next[field.fieldName], field);
+      sheetFields.forEach((field) => {
+        const metaField = metaFieldMap.get(field.fieldName);
+        if (metaField && security.enableMasking) {
+          next[field.fieldName] = maskValue(next[field.fieldName], metaField);
         }
       });
       return next;
     });
-  }, [meta, rowsWithFormula, security.enableMasking]);
+  }, [displayRows, meta, security.enableMasking, sheetFields]);
 
-  const displayFields = useMemo(() => {
-    if (!meta) return [];
-    const custom = customColumns.map((c) => ({
-      fieldName: c.fieldName,
-      title: c.title,
-      type: 'string' as const,
-      sortable: true,
-      filterable: true,
-      sensitive: false,
-    }));
-    return [...meta.fields, ...custom, { fieldName: 'calc_col', title: '公式列', type: 'number', sortable: false, filterable: false, sensitive: false }];
-  }, [meta, customColumns]);
-  const selectedWidthValue = activeSheetState?.grid.columnWidths[selectedWidthField] ?? 140;
+  const visibleMaskedRows = useMemo(() => [headerRow, ...maskedRows], [headerRow, maskedRows]);
+
+  const buildColorKey = (rowIndex: number, fieldName: string) => {
+    if (isHeaderRowIndex(rowIndex)) {
+      return `header:${fieldName}`;
+    }
+
+    const dataRowIndex = toDataRowIndex(rowIndex);
+    const effectiveIndex = isSnapshotMode ? (activeSourceIndexes[dataRowIndex] ?? dataRowIndex) : dataRowIndex;
+    return `${isSnapshotMode ? 'snapshot' : `page-${page}`}:${effectiveIndex}:${fieldName}`;
+  };
+
+  const visibleCellColors = useMemo(() => {
+    const next: Record<string, string> = {};
+    visibleFields.forEach((field) => {
+      const headerColor = cellColors[buildColorKey(HEADER_ROW_INDEX, field.fieldName)];
+      if (headerColor) {
+        next[`${HEADER_ROW_INDEX}:${field.fieldName}`] = headerColor;
+      }
+    });
+    activeRows.forEach((_, rowIndex) => {
+      const visualRowIndex = toVisualRowIndex(rowIndex);
+      visibleFields.forEach((field) => {
+        const color = cellColors[buildColorKey(visualRowIndex, field.fieldName)];
+        if (color) {
+          next[`${visualRowIndex}:${field.fieldName}`] = color;
+        }
+      });
+    });
+    return next;
+  }, [activeRows, cellColors, isSnapshotMode, page, visibleFields]);
 
   const summary = useMemo(() => {
-    if (!maskedRows.length) return { sum: 0, avg: 0, count: 0 };
+    if (!visibleMaskedRows.length) return { sum: 0, avg: 0, count: 0 };
     const numericValues: number[] = [];
 
     selectedCells.forEach((key) => {
-      const [rowIdxRaw, fieldName] = key.split(':');
-      const row = maskedRows[Number(rowIdxRaw)];
+      const [rowIndexRaw, fieldName] = key.split(':');
+      const row = visibleMaskedRows[Number(rowIndexRaw)];
       const value = Number(row?.[fieldName]);
       if (!Number.isNaN(value)) numericValues.push(value);
     });
 
     const values = numericValues.length
       ? numericValues
-      : maskedRows
-          .flatMap((r) => Object.values(r))
-          .map((x) => Number(x))
-          .filter((x) => !Number.isNaN(x));
+      : visibleMaskedRows
+          .flatMap((row) => Object.values(row))
+          .map((value) => Number(value))
+          .filter((value) => !Number.isNaN(value));
 
-    const sum = values.reduce((acc, cur) => acc + cur, 0);
+    const sum = values.reduce((acc, current) => acc + current, 0);
     return { sum, avg: values.length ? sum / values.length : 0, count: values.length };
-  }, [maskedRows, selectedCells]);
+  }, [selectedCells, visibleMaskedRows]);
+
+  const totalRows = snapshotViewport?.totalRows ?? pageData?.totalRows ?? meta?.totalRows ?? 0;
+  const hasMore = snapshotViewport?.hasMore ?? pageData?.hasMore ?? false;
 
   if (error) return <div>加载失败: {error}</div>;
-  if (!meta || !pageData || !adapter || !activeSheetState) return <div>{loading ? '加载中...' : '暂无数据'}</div>;
+  if (!meta || !pageData || !adapter || !gridState) return <div>{loading ? '加载中...' : '暂无数据'}</div>;
 
-  const updateActiveSheet = (updater: (state: UniverGridState) => UniverGridState) => {
-    setSheetStates((prev) => prev.map((sheet) => (sheet.name === activeSheetState.name ? { ...sheet, grid: updater(sheet.grid) } : sheet)));
+  const updateGridState = (updater: (state: UniverGridState) => UniverGridState) => {
+    setGridState((prev) => (prev ? updater(prev) : prev));
+  };
+
+  const clearSelections = () => {
+    setGridSelection(createEmptyGridSelection());
+  };
+
+  const clearFormulaErrors = () => {
+    setToast(null);
+  };
+
+  const saveWorkbook = (name: string, nextWorkbookId: string) => {
+    workbookService.save({
+      workbookId: nextWorkbookId,
+      ownerUserId: user.userId,
+      ownerOrg: user.department,
+      name,
+      datasetId,
+      sheets: [
+        {
+          sheetId: 'sheet-1',
+          name: WORKSHEET_NAME,
+          viewConfig: {
+            ownerUserId: user.userId,
+            ownerOrg: user.department,
+            filters,
+            sortBy,
+            sortOrder,
+            visibleColumns: sheetFields.filter((field) => !gridState.hiddenColumns.includes(field.fieldName)).map((field) => field.fieldName),
+            columnWidths: gridState.columnWidths,
+            freeze: gridState.freeze,
+            activeSheet: WORKSHEET_NAME,
+          },
+          sheetFields: cloneFields(sheetFields),
+          rowSnapshot: sanitizeLegacyRows(snapshotRows ?? workingRows),
+          cellColors,
+        },
+      ],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+  };
+
+  const updateCellValue = (rowIndex: number, fieldName: string, value: string) => {
+    clearFormulaErrors();
+
+    if (isHeaderRowIndex(rowIndex)) {
+      renameColumn(fieldName, value);
+      return;
+    }
+
+    const dataRowIndex = toDataRowIndex(rowIndex);
+
+    if (isSnapshotMode) {
+      const absoluteIndex = activeSourceIndexes[dataRowIndex] ?? dataRowIndex;
+      setSnapshotRows((prev) =>
+        prev
+          ? prev.map((row, index) => (index === absoluteIndex ? { ...row, [fieldName]: value } : row))
+          : prev,
+      );
+      return;
+    }
+
+    setWorkingRows((prev) => prev.map((row, index) => (index === dataRowIndex ? { ...row, [fieldName]: value } : row)));
+  };
+
+  const commitFormulaBarValue = () => {
+    if (pendingFormulaReferencePickRef.current) {
+      pendingFormulaReferencePickRef.current = false;
+      return;
+    }
+
+    if (!formulaTarget) {
+      setIsFormulaEditing(false);
+      setIsFormulaDirty(false);
+      return;
+    }
+
+    if (isFormulaDirty && formulaInput !== formulaTarget.value) {
+      updateCellValue(formulaTarget.rowIndex, formulaTarget.fieldName, formulaInput);
+    }
+
+    setIsFormulaEditing(false);
+    setIsFormulaDirty(false);
+  };
+
+  const cancelFormulaBarEdit = () => {
+    setFormulaInput(formulaTarget?.value ?? activeCell?.value ?? '');
+    setIsFormulaEditing(false);
+    setIsFormulaDirty(false);
+  };
+
+  const handleFormulaReferencePicked = (columnIndex: number, rowIndex: number) => {
+    if (!isFormulaReferenceMode) return;
+
+    const reference = `${getColumnLabel(columnIndex)}${rowIndex + 1}`;
+    const targetCell = formulaTarget ?? createFormulaEditTarget(activeCell);
+    let nextCaret = 0;
+
+    setFormulaTarget(targetCell);
+    setFormulaInput((currentValue) => {
+      const inserted = insertReferenceAtSelection(currentValue, reference, formulaInputSelectionRef.current);
+      nextCaret = inserted.caret;
+      return inserted.value;
+    });
+    setIsFormulaDirty(true);
+    focusFormulaInputAtCaret(nextCaret);
+  };
+
+  const jumpToCell = (value: string) => {
+    const parsed = parseCellReference(value);
+    if (!parsed) {
+      setNameBoxInput(activeCell?.label ?? '');
+      setToast('请输入类似 A1、B12 的单元格地址');
+      return;
+    }
+
+    if (parsed.col < 0 || parsed.col >= visibleFields.length || parsed.row < 0 || parsed.row >= visibleRowCount) {
+      setNameBoxInput(activeCell?.label ?? '');
+      setToast('目标单元格超出当前可见范围');
+      return;
+    }
+
+    setGridSelection(createCellGridSelection(parsed.col, parsed.row));
+    setScrollTarget({ col: parsed.col, row: parsed.row, token: Date.now() });
+  };
+
+  const resetToCurrentDataset = () => {
+    const resetFields = cloneFields(meta.fields);
+    setPage(0);
+    setKeyword('');
+    setSortBy(undefined);
+    setSortOrder('asc');
+    setFilters({});
+    setSheetFields(resetFields);
+    setGridState(createGridState(resetFields));
+    setCellColors({});
+    setWorkingRows([]);
+    setSnapshotRows(isBlankWorkbook ? createBlankRows(DEFAULT_BLANK_ROW_COUNT, resetFields) : null);
+    clearSelections();
+    setToast(isBlankWorkbook ? '已恢复默认空白工作簿' : '已恢复系统示例数据');
+  };
+
+  const getSelectedDataRowIndexes = () => {
+    const rowIndexes = selectedRows.size
+      ? Array.from(selectedRows)
+      : primarySelectedRowIndex != null
+        ? [primarySelectedRowIndex]
+        : [];
+
+    return rowIndexes.filter((rowIndex) => rowIndex >= DATA_ROW_OFFSET).map(toDataRowIndex);
+  };
+
+  const insertRowsAt = (position: 'before' | 'after') => {
+    const selectedRowIndexes = getSelectedDataRowIndexes();
+    const count = Math.max(selectedRowIndexes.length, 1);
+    const emptyRows = Array.from({ length: count }, () => createEmptyRow(sheetFields));
+
+    if (isSnapshotMode) {
+      const insertIndex = selectedRowIndexes.length
+        ? (() => {
+            const baseIndexes = selectedRowIndexes.map((rowIndex) => activeSourceIndexes[rowIndex] ?? rowIndex);
+            return position === 'before' ? Math.min(...baseIndexes) : Math.max(...baseIndexes) + 1;
+          })()
+        : primarySelectedRowIndex === HEADER_ROW_INDEX
+          ? 0
+          : (snapshotRows?.length ?? 0);
+      setSnapshotRows((prev) => insertItems(prev ?? [], insertIndex, emptyRows));
+    } else {
+      const insertIndex = selectedRowIndexes.length
+        ? (position === 'before' ? Math.min(...selectedRowIndexes) : Math.max(...selectedRowIndexes) + 1)
+        : primarySelectedRowIndex === HEADER_ROW_INDEX
+          ? 0
+          : workingRows.length;
+      setWorkingRows((prev) => insertItems(prev, insertIndex, emptyRows));
+    }
+
+    setCellColors({});
+    setToast(`已插入 ${count} 行`);
+  };
+
+  const deleteSelectedRows = () => {
+    const rowIndexesToDelete = getSelectedDataRowIndexes();
+
+    if (!rowIndexesToDelete.length) {
+      setToast('请先选择要删除的数据行');
+      return;
+    }
+
+    const rowIndexes = rowIndexesToDelete.sort((a, b) => b - a);
+    if (isSnapshotMode) {
+      const absoluteIndexes = new Set(rowIndexes.map((rowIndex) => activeSourceIndexes[rowIndex] ?? rowIndex));
+      setSnapshotRows((prev) => (prev ? prev.filter((_, index) => !absoluteIndexes.has(index)) : prev));
+    } else {
+      const localIndexes = new Set(rowIndexes);
+      setWorkingRows((prev) => prev.filter((_, index) => !localIndexes.has(index)));
+    }
+
+    setCellColors({});
+    clearSelections();
+    setToast(`已删除 ${rowIndexes.length} 行`);
+  };
+
+  const createInsertedColumns = (count: number, seedValue: string): DatasetField[] => {
+    const requestedNames = seedValue
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
+
+    const names = requestedNames.length === 1 && count > 1
+      ? Array.from({ length: count }, (_, index) => `${requestedNames[0]}_${index + 1}`)
+      : requestedNames;
+
+    const fallbackNames = names.length ? names : Array.from({ length: count }, () => '');
+    const existingFieldNames = new Set(sheetFields.map((field) => field.fieldName));
+
+    return Array.from({ length: Math.max(count, fallbackNames.length) }, (_, index) =>
+      buildFieldFromTitle(fallbackNames[index] ?? '', existingFieldNames, sheetFields.length + index),
+    );
+  };
+
+  const insertColumnsAt = (position: 'before' | 'after') => {
+    const selectedFieldNames = selectedColumns.size
+      ? Array.from(selectedColumns)
+      : primarySelectedFieldName
+        ? [primarySelectedFieldName]
+        : [];
+    const count = Math.max(selectedFieldNames.length, 1);
+    const input = prompt(
+      '请输入列名，多个列名用英文逗号分隔；留空会插入空白列；如果只输入一个列名且已选多列，会自动按数量生成。',
+      '',
+    );
+    if (input === null) return;
+
+    const newFields = createInsertedColumns(count, input);
+    const indexes = selectedFieldNames.map((fieldName) => sheetFields.findIndex((field) => field.fieldName === fieldName)).filter((index) => index >= 0);
+    const insertIndex = indexes.length
+      ? position === 'before'
+        ? Math.min(...indexes)
+        : Math.max(...indexes) + 1
+      : sheetFields.length;
+
+    setSheetFields((prev) => insertItems(prev, insertIndex, newFields));
+    setWorkingRows((prev) =>
+      prev.map((row) => ({ ...row, ...Object.fromEntries(newFields.map((field) => [field.fieldName, ''])) })),
+    );
+    setSnapshotRows((prev) =>
+      prev
+        ? prev.map((row) => ({ ...row, ...Object.fromEntries(newFields.map((field) => [field.fieldName, ''])) }))
+        : prev,
+    );
+    updateGridState((state) => ({
+      ...state,
+      columnWidths: {
+        ...state.columnWidths,
+        ...Object.fromEntries(newFields.map((field) => [field.fieldName, 140])),
+      },
+    }));
+    setToast(`已插入 ${newFields.length} 列`);
+  };
+
+  const deleteSelectedColumns = () => {
+    const fieldNames = selectedColumns.size
+      ? Array.from(selectedColumns)
+      : primarySelectedFieldName
+        ? [primarySelectedFieldName]
+        : [];
+    if (!fieldNames.length) {
+      setToast('请先选择要删除的列');
+      return;
+    }
+
+    setSheetFields((prev) => prev.filter((field) => !fieldNames.includes(field.fieldName)));
+    setWorkingRows((prev) => prev.map((row) => Object.fromEntries(Object.entries(row).filter(([key]) => !fieldNames.includes(key)))));
+    setSnapshotRows((prev) =>
+      prev ? prev.map((row) => Object.fromEntries(Object.entries(row).filter(([key]) => !fieldNames.includes(key)))) : prev,
+    );
+    updateGridState((state) => ({
+      ...state,
+      hiddenColumns: state.hiddenColumns.filter((fieldName) => !fieldNames.includes(fieldName)),
+      columnWidths: Object.fromEntries(Object.entries(state.columnWidths).filter(([fieldName]) => !fieldNames.includes(fieldName))),
+    }));
+    setCellColors((prev) =>
+      Object.fromEntries(
+        Object.entries(prev).filter(([key]) => !fieldNames.some((fieldName) => key.endsWith(`:${fieldName}`))),
+      ),
+    );
+    clearSelections();
+    setToast(`已删除 ${fieldNames.length} 列`);
+  };
+
+  const renameWorkbook = () => {
+    const nextName = prompt('请输入工作簿名称', workbookName);
+    if (!nextName?.trim()) return;
+    setWorkbookName(nextName.trim());
+    setToast(`工作簿名已改为“${nextName.trim()}”`);
+  };
+
+  const renameColumn = (fieldName: string, title: string) => {
+    const nextTitle = title.trim();
+
+    setSheetFields((prev) =>
+      prev.map((field) =>
+        field.fieldName === fieldName
+          ? {
+              ...field,
+              title: nextTitle,
+            }
+          : field,
+      ),
+    );
+    setToast(nextTitle ? `列名已改为“${nextTitle}”` : '列名已清空');
+  };
+
+  const applyColorToSelection = (color: string | null) => {
+    const targets = new Set<string>();
+
+    if (selectedCells.size) {
+      selectedCells.forEach((key) => {
+        const [rowIndexRaw, fieldName] = key.split(':');
+        targets.add(buildColorKey(Number(rowIndexRaw), fieldName));
+      });
+    } else if (selectedRows.size) {
+      selectedRows.forEach((rowIndex) => {
+        visibleFields.forEach((field) => targets.add(buildColorKey(rowIndex, field.fieldName)));
+      });
+    } else if (selectedColumns.size) {
+      selectedColumns.forEach((fieldName) => {
+        targets.add(buildColorKey(HEADER_ROW_INDEX, fieldName));
+        activeRows.forEach((_, rowIndex) => targets.add(buildColorKey(toVisualRowIndex(rowIndex), fieldName)));
+      });
+    }
+
+    if (!targets.size) {
+      setToast('请先选择单元格、行或列');
+      return;
+    }
+
+    setCellColors((prev) => {
+      const next = { ...prev };
+      targets.forEach((key) => {
+        if (color) next[key] = color;
+        else delete next[key];
+      });
+      return next;
+    });
+    setToast(color ? '已应用颜色标记' : '已清除颜色标记');
   };
 
   return (
     <Watermark enabled={security.enableWatermark} text={buildWatermarkText(user, security)}>
-      <div style={{ padding: 12 }}>
-        <button onClick={onBack}>返回</button>
+      <div className="page-shell workbook-page">
+          <div className="page-heading">
+          <div>
+            <div className="eyebrow">Workbook</div>
+            <h2 style={{ margin: 0, cursor: 'text' }} onDoubleClick={renameWorkbook}>{workbookName}</h2>
+          </div>
+          <button className="button-secondary" onClick={onBack}>返回</button>
+        </div>
         <SecurityGuard user={user} security={security}>
           <Toolbar
             datasetName={meta.name}
             workbookName={workbookName}
-            formula={formula}
-            formulaError={formulaError}
-            fields={displayFields}
-            selectedWidthField={selectedWidthField}
-            selectedWidthValue={selectedWidthValue}
-            onSelectWidthField={setSelectedWidthField}
-            onChangeWidth={(width) => {
-              updateActiveSheet((state) => adapter.setColumnWidth(state, selectedWidthField, width));
-            }}
-            onFormulaChange={setFormula}
+            importing={isImporting}
+            isFirstRowFrozen={gridState.freeze.row >= 1}
+            isFirstColFrozen={gridState.freeze.col >= 1}
             onImportCsv={async (file) => {
-              const text = await file.text();
-              const result = await datasetService.importCsv(text);
-              setPage(0);
-              setRefreshKey((x) => x + 1);
-              setToast(`导入成功：${result.imported} 行`);
-            }}
-            onApplyFormula={() => {
-              if (!adapter.validateFormula(formula)) {
-                setFormulaError('公式不在白名单中');
-                setToast('公式不在白名单中');
-                return;
+              setIsImporting(true);
+              setToast(`正在导入 ${file.name}...`);
+
+              try {
+                const result = await datasetService.importCsv(file);
+                const importedFields = cloneFields(result.fields);
+                setPage(0);
+                setKeyword('');
+                setSortBy(undefined);
+                setSortOrder('asc');
+                setFilters({});
+                setSheetFields(importedFields);
+                setWorkingRows([]);
+                setSnapshotRows(result.rows);
+                setGridState(createGridState(importedFields));
+                setCellColors({});
+                clearSelections();
+                setToast(`已导入当前工作簿：${result.imported} 行，${result.fields.length} 列`);
+              } catch (importError) {
+                const message = importError instanceof Error ? importError.message : '导入失败';
+                setToast(`导入失败：${message}`);
+              } finally {
+                setIsImporting(false);
               }
-              setFormulaError(null);
-              setToast('公式已应用');
             }}
             onFreezeFirstRow={() => {
-              updateActiveSheet((state) => adapter.setFreeze(state, 1, state.freeze.col));
-              setToast('已冻结首行');
+              const willFreeze = gridState.freeze.row === 0;
+              updateGridState((state) => adapter.setFreeze(state, willFreeze ? 1 : 0, state.freeze.col));
+              setToast(willFreeze ? '已冻结首行' : '已取消冻结首行');
             }}
             onFreezeFirstCol={() => {
-              updateActiveSheet((state) => adapter.setFreeze(state, state.freeze.row, 1));
-              setToast('已冻结首列');
+              const willFreeze = gridState.freeze.col === 0;
+              updateGridState((state) => adapter.setFreeze(state, state.freeze.row, willFreeze ? 1 : 0));
+              setToast(willFreeze ? '已冻结首列' : '已取消冻结首列');
             }}
             onSearch={(value) => {
+              setPage(0);
               setKeyword(value);
               emit('search', { keyword: value });
             }}
@@ -219,10 +1045,10 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
                 filters,
                 sortBy,
                 sortOrder,
-                visibleColumns: displayFields.filter((f) => !activeSheetState.grid.hiddenColumns.includes(f.fieldName)).map((f) => f.fieldName),
-                columnWidths: activeSheetState.grid.columnWidths,
-                freeze: activeSheetState.grid.freeze,
-                activeSheet: activeSheetState.grid.activeSheet,
+                visibleColumns: sheetFields.filter((field) => !gridState.hiddenColumns.includes(field.fieldName)).map((field) => field.fieldName),
+                columnWidths: gridState.columnWidths,
+                freeze: gridState.freeze,
+                activeSheet: WORKSHEET_NAME,
                 createdAt: new Date().toISOString(),
               });
               emit('save_view', { viewName });
@@ -230,69 +1056,36 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
             }}
             onSaveWorkbook={() => {
               if (!user.capabilities.canSaveWorkbook) return;
-              const name = workbookName;
-              const id = workbookId ?? crypto.randomUUID();
-              workbookService.save({
-                workbookId: id,
-                ownerUserId: user.userId,
-                ownerOrg: user.department,
-                name,
-                datasetId,
-                sheets: sheetStates.map((sheet, index) => ({
-                  sheetId: `s${index + 1}`,
-                  name: sheet.name,
-                  viewConfig: {
-                    filters,
-                    sortBy,
-                    sortOrder,
-                    visibleColumns: displayFields.map((f) => f.fieldName),
-                    columnWidths: sheet.grid.columnWidths,
-                    freeze: sheet.grid.freeze,
-                    activeSheet: sheet.grid.activeSheet,
-                  },
-                  formulaColumns: [{ fieldName: 'calc_col', formula }],
-                })),
-                createdAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString(),
-              });
-              setWorkbookId(id);
-              emit('save_workbook', { workbookName: name });
-              setToast(`工作簿“${name}”保存成功`);
+              const nextWorkbookId = workbookId ?? crypto.randomUUID();
+              saveWorkbook(workbookName, nextWorkbookId);
+              setWorkbookId(nextWorkbookId);
+              emit('save_workbook', { workbookName });
+              setToast(`工作簿“${workbookName}”保存成功`);
             }}
             onSaveWorkbookAs={() => {
               if (!user.capabilities.canSaveWorkbook) return;
               const name = prompt('另存为工作簿名称', `${workbookName}-副本`);
               if (!name) return;
-              const id = crypto.randomUUID();
+              const nextWorkbookId = crypto.randomUUID();
               setWorkbookName(name);
-              setWorkbookId(id);
-              workbookService.save({
-                workbookId: id,
-                ownerUserId: user.userId,
-                ownerOrg: user.department,
-                name,
-                datasetId,
-                sheets: sheetStates.map((sheet, index) => ({
-                  sheetId: `s${index + 1}`,
-                  name: sheet.name,
-                  viewConfig: {
-                    filters,
-                    sortBy,
-                    sortOrder,
-                    visibleColumns: displayFields.map((f) => f.fieldName),
-                    columnWidths: sheet.grid.columnWidths,
-                    freeze: sheet.grid.freeze,
-                    activeSheet: sheet.grid.activeSheet,
-                  },
-                  formulaColumns: [{ fieldName: 'calc_col', formula }],
-                })),
-                createdAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString(),
-              });
+              setWorkbookId(nextWorkbookId);
+              saveWorkbook(name, nextWorkbookId);
               setToast(`已另存为“${name}”`);
             }}
           />
-          <div className="card" style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+
+          <div className="card action-cluster workbook-utility-bar" style={{ marginTop: 8 }}>
+            <button onClick={renameWorkbook}>修改表名</button>
+            <button onClick={() => setShowColumnManager((value) => !value)}>
+              {showColumnManager ? '收起列管理' : '列管理'}
+            </button>
+            <button onClick={() => insertRowsAt('before')}>上方插入行</button>
+            <button onClick={() => insertRowsAt('after')}>下方插入行</button>
+            <button onClick={deleteSelectedRows}>删除选中行</button>
+            <button onClick={() => insertColumnsAt('before')}>左侧插入列</button>
+            <button onClick={() => insertColumnsAt('after')}>右侧插入列</button>
+            <button onClick={deleteSelectedColumns}>删除选中列</button>
+            <button onClick={resetToCurrentDataset}>{isBlankWorkbook ? '恢复默认空表' : '恢复示例数据'}</button>
             <button
               onClick={async () => {
                 if (!(user.capabilities.canCopy && security.allowCopy)) return;
@@ -303,58 +1096,71 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
             >
               复制前20行
             </button>
-            <button
-              onClick={async () => {
-                await datasetService.clearImportedRows();
-                setPage(0);
-                setRefreshKey((x) => x + 1);
-                setToast('已恢复系统示例数据');
-              }}
-            >
-              恢复示例数据
-            </button>
-            <button
-              onClick={() => {
-                const empty = Object.fromEntries(displayFields.map((f) => [f.fieldName, '']));
-                setAddedRows((prev) => [...prev, empty]);
-                setToast('已新增一行');
-              }}
-            >
-              新增行
-            </button>
-            <button
-              onClick={() => {
-                const name = prompt('请输入新列名称(英文/数字)', `col_${customColumns.length + 1}`);
-                if (!name) return;
-                if (displayFields.some((f) => f.fieldName === name)) {
-                  setToast('列名已存在');
-                  return;
-                }
-                setCustomColumns((prev) => [...prev, { fieldName: name, title: name }]);
-                setToast(`已新增列 ${name}`);
-              }}
-            >
-              新增列
-            </button>
-            {displayFields.map((f) => (
-              <label key={f.fieldName}>
-                <input type="checkbox" checked={!activeSheetState.grid.hiddenColumns.includes(f.fieldName)} onChange={() => updateActiveSheet((state) => adapter.toggleColumn(state, f.fieldName))} />
-                {f.title}
-              </label>
-            ))}
           </div>
-          <div className="card" style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+
+          {showColumnManager ? (
+            <div className="card" style={{ marginTop: 8 }}>
+              <div className="inline-actions" style={{ marginBottom: 8 }}>
+                <strong>列管理</strong>
+                <span className="muted">勾选展示，取消勾选隐藏。</span>
+              </div>
+              <div className="column-manager-grid">
+                {sheetFields.map((field) => {
+                  const visible = !gridState.hiddenColumns.includes(field.fieldName);
+                  return (
+                    <label key={field.fieldName} className={`column-manager-chip${visible ? ' is-visible' : ''}`}>
+                      <input
+                        type="checkbox"
+                        checked={visible}
+                        onChange={() => updateGridState((state) => adapter.toggleColumn(state, field.fieldName))}
+                      />
+                      <span>{field.title}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+
+          <div className="card action-cluster workbook-utility-bar" style={{ marginTop: 8 }}>
+            <div className="inline-actions">
+              <span className="muted">颜色标记</span>
+              {CELL_COLOR_OPTIONS.map((option) => (
+                <button
+                  key={option.value}
+                  className="color-chip"
+                  style={{
+                    background: option.value,
+                    color: '#172033',
+                    boxShadow: selectedColor === option.value ? 'inset 0 0 0 2px #172033' : 'none',
+                  }}
+                  onClick={() => {
+                    setSelectedColor(option.value);
+                    applyColorToSelection(option.value);
+                  }}
+                >
+                  {option.label}
+                </button>
+              ))}
+              <button className="button-secondary" onClick={() => applyColorToSelection(null)}>清除标记</button>
+            </div>
+            <span className="muted">双击第 1 行单元格可直接改列名，双击任意单元格可直接编辑，以 `=` 开头会按公式计算。</span>
+          </div>
+
+          <div className="card action-cluster workbook-filter-bar" style={{ marginTop: 8, alignItems: 'center' }}>
             <strong>当前筛选：</strong>
+            <span className="muted">输入支持模糊查询，例如 `hb` 可匹配 `华北`。</span>
             {Object.entries(filters)
-              .filter(([, v]) => v)
-              .map(([k, v]) => (
-                <span key={k} style={{ background: '#e2e8f0', borderRadius: 12, padding: '2px 8px' }}>
-                  {k}: {v}
+              .filter(([, value]) => value)
+              .map(([fieldName, value]) => (
+                <span key={fieldName} style={{ background: '#e2e8f0', borderRadius: 12, padding: '2px 8px' }}>
+                  {fieldName}: {value}
                   <button
                     style={{ marginLeft: 6, background: '#64748b', padding: '2px 6px' }}
                     onClick={() => {
-                      setFilters((prev) => ({ ...prev, [k]: '' }));
-                      setToast(`已移除筛选 ${k}`);
+                      setFilters((prev) => ({ ...prev, [fieldName]: '' }));
+                      setPage(0);
+                      setToast(`已移除筛选 ${fieldName}`);
                     }}
                   >
                     x
@@ -364,6 +1170,7 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
             <button
               onClick={() => {
                 setFilters({});
+                setPage(0);
                 setToast('已清空所有筛选');
               }}
             >
@@ -371,86 +1178,95 @@ export function WorkbookPage({ datasetId, onBack }: Props) {
             </button>
           </div>
 
-          <WorkbookShell
-            fields={displayFields}
-            rows={maskedRows}
-            hiddenColumns={activeSheetState.grid.hiddenColumns}
-            columnWidths={activeSheetState.grid.columnWidths}
-            freeze={activeSheetState.grid.freeze}
-            selectedCells={selectedCells}
-            onSelectRange={(startRow, endRow, startField, endField, append) => {
-              const rowMin = Math.min(startRow, endRow);
-              const rowMax = Math.max(startRow, endRow);
-              const visible = displayFields.filter((f) => !activeSheetState.grid.hiddenColumns.includes(f.fieldName));
-              const colStart = visible.findIndex((f) => f.fieldName === startField);
-              const colEnd = visible.findIndex((f) => f.fieldName === endField);
-              const colMin = Math.min(colStart, colEnd);
-              const colMax = Math.max(colStart, colEnd);
-
-              setSelectedCells((prev) => {
-                const next = append ? new Set(prev) : new Set<string>();
-                for (let r = rowMin; r <= rowMax; r += 1) {
-                  for (let c = colMin; c <= colMax; c += 1) {
-                    const field = visible[c];
-                    if (field) next.add(`${r}:${field.fieldName}`);
-                  }
+          <div className="card workbook-formula-bar" style={{ marginTop: 8 }}>
+            <input
+              className="workbook-name-box"
+              value={nameBoxInput}
+              onChange={(event) => setNameBoxInput(event.target.value.toUpperCase())}
+              onBlur={() => setNameBoxInput(activeCell?.label ?? '')}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  jumpToCell(nameBoxInput);
                 }
-                return next;
-              });
-            }}
-            onEditCell={(rowIndex, fieldName, value) => {
-              if (rowIndex < baseRows.length) {
-                setEditedRows((prev) => {
-                  const current = [...(prev ?? baseRows)];
-                  current[rowIndex] = { ...current[rowIndex], [fieldName]: value };
-                  return current;
-                });
-              } else {
-                const addedIndex = rowIndex - baseRows.length;
-                setAddedRows((prev) => {
-                  const current = [...prev];
-                  current[addedIndex] = { ...(current[addedIndex] ?? {}), [fieldName]: value };
-                  return current;
-                });
+                if (event.key === 'Escape') {
+                  setNameBoxInput(activeCell?.label ?? '');
+                }
+              }}
+              placeholder="A1"
+              aria-label="当前单元格地址"
+            />
+            <span className="workbook-fx-label">fx</span>
+            <input
+              className="workbook-formula-input"
+              ref={formulaInputRef}
+              value={formulaInput}
+              onFocus={() => {
+                if (!activeCell) return;
+                setFormulaTarget(createFormulaEditTarget(activeCell));
+                setFormulaInput(activeCell.value);
+                setIsFormulaEditing(true);
+                setIsFormulaDirty(false);
+                updateFormulaInputSelection();
+              }}
+              onChange={(event) => {
+                setFormulaInput(event.target.value);
+                setIsFormulaDirty(true);
+                updateFormulaInputSelection(event.currentTarget);
+              }}
+              onSelect={() => updateFormulaInputSelection()}
+              onClick={() => updateFormulaInputSelection()}
+              onKeyUp={() => updateFormulaInputSelection()}
+              onBlur={commitFormulaBarValue}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  commitFormulaBarValue();
+                }
+                if (event.key === 'Escape') {
+                  cancelFormulaBarEdit();
+                }
+              }}
+              placeholder="编辑当前单元格内容，公式以 = 开头"
+              aria-label="当前单元格内容"
+              disabled={!activeCell}
+            />
+          </div>
+
+          <WorkbookShell
+            fields={sheetFields}
+            sourceRows={activeRows}
+            displayRows={maskedRows}
+            hiddenColumns={gridState.hiddenColumns}
+            columnWidths={gridState.columnWidths}
+            freeze={gridState.freeze}
+            gridSelection={gridSelection}
+            cellColors={visibleCellColors}
+            rowOffset={isSnapshotMode ? 0 : page * PAGE_SIZE}
+            isFormulaReferenceMode={isFormulaReferenceMode}
+            onGridSelectionChange={setGridSelection}
+            onGridPointerDown={() => {
+              if (isFormulaReferenceMode) {
+                pendingFormulaReferencePickRef.current = true;
               }
-              setToast(`已修改单元格 ${fieldName}`);
             }}
-            filterValues={filters}
-            onSort={(fieldName, order) => {
-              setSortBy(fieldName);
-              setSortOrder(order);
-              emit('sort', { fieldName, order });
-            }}
-            onFilter={(fieldName, value) => {
-              setFilters((prev) => ({ ...prev, [fieldName]: value }));
-              emit('filter', { fieldName, value });
+            onSelectCell={(columnIndex, rowIndex) => setGridSelection(createCellGridSelection(columnIndex, rowIndex))}
+            onFormulaReferencePicked={handleFormulaReferencePicked}
+            onEditCell={updateCellValue}
+            onRenameColumn={renameColumn}
+            scrollTarget={scrollTarget}
+            onResizeColumn={(fieldName, width) => {
+              updateGridState((state) => adapter.setColumnWidth(state, fieldName, width));
             }}
           />
 
-          <div className="card" style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
-            <button disabled={page === 0} onClick={() => setPage((p) => Math.max(p - 1, 0))}>上一页</button>
-            <button disabled={!pageData.hasMore} onClick={() => setPage((p) => p + 1)}>下一页</button>
-            <span> 当前第 {page + 1} 页 / 总行数 {meta.totalRows.toLocaleString()} </span>
-          </div>
-
-          <div className="card" style={{ marginTop: 8 }}>
-            <div style={{ fontSize: 12, color: '#64748b', marginBottom: 6 }}>
-              Sheet 说明：<strong>明细</strong>用于看原始数据；<strong>分析</strong>用于做编辑与公式试算。
+          <div className="card workbook-footer-bar" style={{ marginTop: 8 }}>
+            <div className="inline-actions">
+              <button disabled={page === 0} onClick={() => setPage((current) => Math.max(current - 1, 0))}>上一页</button>
+              <button disabled={!hasMore} onClick={() => setPage((current) => current + 1)}>下一页</button>
+              <span>当前第 {page + 1} 页 / 总行数 {totalRows.toLocaleString()}</span>
             </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-            {SHEETS.map((sheetName) => (
-              <button
-                key={sheetName}
-                style={{ fontWeight: sheetName === activeSheet ? 700 : 400, background: sheetName === activeSheet ? '#1d4ed8' : '#64748b' }}
-                onClick={() => {
-                  setActiveSheet(sheetName);
-                  updateActiveSheet((state) => adapter.setActiveSheet(state, sheetName));
-                }}
-              >
-                {sheetName}
-              </button>
-            ))}
-            </div>
+            <span className="muted">`Shift` 选择连续行列，`Ctrl/Cmd` 追加选择，选中列后可在左右两侧插入新列。</span>
           </div>
 
           <footer className="card" style={{ marginTop: 8 }}>
