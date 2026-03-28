@@ -1,6 +1,14 @@
+import { isRemotePersistenceEnabled } from '../config/persistence';
+import { requestJson } from './http.service';
+import {
+  clearStoredSession,
+  getStoredAccessToken,
+  getStoredUserRaw,
+  persistSession,
+} from './session-storage.service';
+
 import type { SecurityConfig, UserContext } from '../types/models';
 
-const USER_KEY = 'analysis.current.user';
 const HASH_CONFIG = {
   iterations: 120000,
   length: 32,
@@ -11,6 +19,11 @@ interface LoginPayload {
   account: string;
   password: string;
   org: string;
+}
+
+interface RemoteLoginResponse {
+  accessToken: string;
+  user: UserContext;
 }
 
 interface DemoCredential {
@@ -61,7 +74,15 @@ export const mockSecurityConfig: SecurityConfig = {
 };
 
 export function getCurrentUser(): UserContext {
-  const raw = localStorage.getItem(USER_KEY);
+  if (isRemotePersistenceEnabled() && !getAccessToken()) {
+    return {
+      ...defaultUserContext,
+      userId: '',
+      userName: '未登录用户',
+    };
+  }
+
+  const raw = getStoredUserRaw();
   return raw
     ? (JSON.parse(raw) as UserContext)
     : {
@@ -69,6 +90,17 @@ export function getCurrentUser(): UserContext {
         userId: '',
         userName: '未登录用户',
       };
+}
+
+export function hasActiveSession(): boolean {
+  if (isRemotePersistenceEnabled()) {
+    return getAccessToken().length > 0 && getCurrentUser().userId.length > 0;
+  }
+  return getCurrentUser().userId.length > 0;
+}
+
+export function clearSession(): void {
+  clearStoredSession();
 }
 
 function getWebCrypto(): Crypto | null {
@@ -110,6 +142,15 @@ export async function login(payload: LoginPayload): Promise<UserContext> {
     throw new Error('账号/密码/组织不能为空');
   }
 
+  if (isRemotePersistenceEnabled()) {
+    const response = await requestJson<RemoteLoginResponse>('/api/auth/login', {
+      method: 'POST',
+      body: payload,
+    });
+    persistSession(response.user, response.accessToken);
+    return response.user;
+  }
+
   const normalizedAccount = payload.account.trim().toLowerCase();
   const matchedUser = DEMO_CREDENTIALS.find((item) => item.account === normalizedAccount);
 
@@ -137,12 +178,25 @@ export async function login(payload: LoginPayload): Promise<UserContext> {
     roleCodes: matchedUser.profile.roleCodes,
     capabilities: matchedUser.profile.capabilities,
   };
-  localStorage.setItem(USER_KEY, JSON.stringify(user));
+  localStorage.setItem('analysis.current.user', JSON.stringify(user));
   return user;
 }
 
-export function logout(): void {
-  localStorage.removeItem(USER_KEY);
+export async function logout(): Promise<void> {
+  if (isRemotePersistenceEnabled()) {
+    try {
+      await requestJson<void>('/api/auth/logout', {
+        method: 'POST',
+      });
+    } catch {
+      // Swallow remote logout failures so local session is still cleared.
+    }
+  }
+  clearSession();
+}
+
+export function getAccessToken(): string {
+  return getStoredAccessToken();
 }
 
 export function buildWatermarkText(user: UserContext, config: SecurityConfig): string {

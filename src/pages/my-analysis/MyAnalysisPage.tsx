@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { viewSaveService } from '../../features/view-save/viewSave.service';
 import { workbookService } from '../../services/workbook.service';
 import { useSecurity } from '../../features/security/useSecurity';
@@ -10,9 +10,28 @@ interface Props {
 
 export function MyAnalysisPage({ onBack, onOpenWorkbook }: Props) {
   const [refreshKey, setRefreshKey] = useState(0);
+  const [views, setViews] = useState<Awaited<ReturnType<typeof viewSaveService.listByUser>>>([]);
+  const [workbooks, setWorkbooks] = useState<Awaited<ReturnType<typeof workbookService.listByUser>>>([]);
   const { user } = useSecurity();
-  const views = useMemo(() => viewSaveService.listByUser(user.userId), [refreshKey, user.userId]);
-  const workbooks = useMemo(() => workbookService.listByUser(user.userId), [refreshKey, user.userId]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      const [nextViews, nextWorkbooks] = await Promise.all([
+        viewSaveService.listByUser(user.userId),
+        workbookService.listByUser(user.userId),
+      ]);
+
+      if (cancelled) return;
+      setViews(nextViews);
+      setWorkbooks(nextWorkbooks);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshKey, user.userId]);
 
   return (
     <div className="page-shell">
@@ -35,10 +54,10 @@ export function MyAnalysisPage({ onBack, onOpenWorkbook }: Props) {
             </div>
             <div className="inline-actions">
               <button
-              onClick={() => {
+              onClick={async () => {
                 const next = prompt('重命名视图', v.name);
                 if (next) {
-                  viewSaveService.rename(v.viewId, next);
+                  await viewSaveService.rename(v.viewId, next);
                   setRefreshKey((x) => x + 1);
                 }
               }}
@@ -46,8 +65,8 @@ export function MyAnalysisPage({ onBack, onOpenWorkbook }: Props) {
               重命名
             </button>
               <button
-              onClick={() => {
-                viewSaveService.remove(v.viewId);
+              onClick={async () => {
+                await viewSaveService.remove(v.viewId);
                 setRefreshKey((x) => x + 1);
               }}
             >
@@ -71,10 +90,10 @@ export function MyAnalysisPage({ onBack, onOpenWorkbook }: Props) {
             </div>
             <div className="inline-actions">
               <button
-              onClick={() => {
+              onClick={async () => {
                 const next = prompt('重命名工作簿', w.name);
                 if (next) {
-                  workbookService.save({ ...w, name: next, updatedAt: new Date().toISOString() });
+                  await workbookService.save({ ...w, name: next, updatedAt: new Date().toISOString() });
                   setRefreshKey((x) => x + 1);
                 }
               }}
@@ -82,8 +101,8 @@ export function MyAnalysisPage({ onBack, onOpenWorkbook }: Props) {
               重命名
             </button>
               <button
-              onClick={() => {
-                workbookService.remove(w.workbookId);
+              onClick={async () => {
+                await workbookService.remove(w.workbookId);
                 setRefreshKey((x) => x + 1);
               }}
             >

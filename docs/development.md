@@ -1,116 +1,274 @@
 # Development Guide
 
-## 1. 文档目的
+## 1. 文档目标
 
-本文档面向开发人员，描述当前项目的真实实现方式、模块职责、数据流、持久化模型，以及项目实际使用到的开源组件。
+本文档面向开发者，描述当前代码的真实实现方式，而不是产品设想。
 
-核心原则只有一条：
+阅读完本文后，你应该能回答这些问题：
 
-- 文档以当前代码为准
+- 这个项目现在到底是纯前端，还是前后端一体
+- 前端和后端分别负责什么
+- 数据集、工作簿、视图、结果集分别存在哪里
+- “手动拉取结构化数据”这条链路是怎么跑起来的
+- 现在的扩展点在哪里，下一步改什么最合适
 
-因此本文会明确区分：
+## 2. 当前系统形态
 
-- 已实现能力
-- 预留抽象
-- 尚未接入的能力
+当前版本是一个本地运行的一体化分析系统，包含：
 
-## 2. 项目定位
+- React + TypeScript 前端
+- Node.js + Express 后端
+- Postgres 持久化
+- Worker 异步导入与定时同步
+- Docker Compose 本地编排
 
-该项目是“内网在线分析中心”的前端 MVP，用于验证以下场景：
+系统运行模式分两种：
 
-- 用户登录后进入分析工作台
-- 查看可用数据集
-- 打开一个类 Excel 的工作簿页面
-- 在前端完成搜索、筛选、排序、单元格编辑、内联公式、列宽、冻结、保存视图、保存工作簿等交互
-- 在不提供导出入口的前提下，叠加水印、脱敏、复制开关和审计记录
+- `local`
+  浏览器本地演示模式，主要用于无后端的快速验证
+- `remote`
+  当前推荐模式。前端通过 `/api` 调后端，数据落到 Postgres
 
-当前阶段没有真实后端，没有数据库，也没有统一权限平台接入。
+本仓库当前的主开发目标，是 `remote` 模式。
 
-## 3. 技术选型
+## 3. 整体架构
 
-### 3.1 运行时
+### 3.1 服务组成
 
-- React
-- ReactDOM
+Docker 模式下有四个服务：
 
-用途：
+- `web`
+  提供前端静态资源，并做 `/api` 反向代理
+- `api`
+  处理登录、数据集、工作簿、视图、审计、导入任务、编辑会话
+- `worker`
+  轮询导入任务，执行外部接口拉取与定时任务
+- `postgres`
+  保存所有业务数据
 
-- 组件渲染
-- `useState` / `useEffect` / `useMemo` 管理页面状态
-- 使用函数组件实现页面与模块
+### 3.2 请求流
 
-### 3.2 语言与类型系统
+浏览器只访问：
 
-- TypeScript
+- `http://localhost:8080`
 
-用途：
+`web` 容器内的 [`web-server.mjs`](../web-server.mjs) 会把：
 
-- 为数据集、用户、安全配置、审计事件、视图、工作簿等领域对象提供类型定义
-- 约束服务层、页面层与组件层之间的数据接口
+- `/api/*`
 
-### 3.3 构建工具
+代理到：
 
-- Vite
-- `@vitejs/plugin-react`
+- `http://api:8081`
 
-用途：
+因此前端配置中只需要：
 
-- 本地开发服务器
-- 模块热更新
-- 生产构建
-- React JSX 转换支持
+- `VITE_API_BASE_URL=/api`
 
-### 3.4 样式方案
+## 4. 目录说明
 
-- 原生 CSS
-
-当前没有引入：
-
-- Ant Design
-- MUI
-- Tailwind CSS
-- Sass / Less
-- CSS-in-JS 库
-
-## 4. 当前代码结构
+### 4.1 前端
 
 ```txt
 src/
-  main.tsx
-  styles.css
-  adapters/
-    univer/univerAdapter.ts
-  components/
-    security-guard/SecurityGuard.tsx
-    toolbar/Toolbar.tsx
-    watermark/Watermark.tsx
-    workbook-shell/WorkbookShell.tsx
-  features/
-    audit/useAudit.ts
-    dataset/useDataset.ts
-    security/useSecurity.ts
-    view-save/viewSave.service.ts
-    workbook/README.md
-  pages/
-    analysis-center/AnalysisCenterPage.tsx
-    login/LoginPage.tsx
-    my-analysis/MyAnalysisPage.tsx
-    workbook/WorkbookPage.tsx
-  services/
-    audit.service.ts
-    dataset.service.ts
-    security.service.ts
-    workbook.service.ts
-  types/
-    models.ts
-  utils/
-    formulaWhitelist.ts
-    mask.ts
+├── adapters/
+│   └── univer/univerAdapter.ts
+├── components/
+│   ├── security-guard/
+│   ├── toolbar/
+│   ├── watermark/
+│   └── workbook-shell/
+├── config/
+│   └── persistence.ts
+├── features/
+│   ├── audit/
+│   ├── dataset/
+│   ├── security/
+│   ├── view-save/
+│   └── workbook/
+├── pages/
+│   ├── analysis-center/
+│   ├── login/
+│   ├── my-analysis/
+│   └── workbook/
+├── services/
+├── types/
+└── utils/
 ```
 
-## 5. 路由与页面流转
+### 4.2 后端
 
-当前没有使用 React Router。
+```txt
+backend/src/
+├── auth.js
+├── config.js
+├── dataset-format.js
+├── db.js
+├── import-jobs.js
+├── server.js
+├── store.js
+└── worker.js
+```
+
+## 5. 前端模块职责
+
+### 5.1 页面层
+
+#### `src/pages/login/LoginPage.tsx`
+
+- 登录表单
+- 远端模式下提交账号、密码、组织
+- 显示登录错误
+
+#### `src/pages/analysis-center/AnalysisCenterPage.tsx`
+
+- 加载数据集、导入任务、工作簿、视图
+- 新建空白工作簿
+- 手动拉取结构化数据
+- 数据集管理：
+  - 搜索
+  - 打开
+  - 重命名
+  - 删除
+  - 打开来源地址
+  - 复制数据集 ID
+
+#### `src/pages/my-analysis/MyAnalysisPage.tsx`
+
+- 展示当前用户工作簿与视图
+- 重命名与删除
+- 重新打开工作簿
+
+#### `src/pages/workbook/WorkbookPage.tsx`
+
+这是当前前端最复杂的页面，负责：
+
+- 数据集和编辑会话加载
+- 工作簿 UI 状态
+- 筛选、排序、搜索、分页
+- 单元格编辑、公式、颜色标记
+- 行列插入/删除
+- 保存视图、保存工作簿、保存结果集
+
+### 5.2 组件层
+
+#### `src/components/workbook-shell/WorkbookShell.tsx`
+
+- 使用 `@glideapps/glide-data-grid` 渲染网格
+- 处理单元格、行、列选择
+- 承载双击编辑、冻结、滚动联动等表格交互
+
+#### `src/components/toolbar/Toolbar.tsx`
+
+- 工作簿工具栏
+- 搜索、冻结、导入、保存等操作入口
+
+#### `src/components/security-guard/SecurityGuard.tsx`
+
+- 展示导出、复制、脱敏等安全状态
+
+#### `src/components/watermark/Watermark.tsx`
+
+- 页面水印展示
+
+### 5.3 服务层
+
+#### `src/services/dataset.service.ts`
+
+核心职责：
+
+- 区分 `local` / `remote` 模式
+- 空白工作簿虚拟数据集
+- 本地 `csv/xls/xlsx` 导入解析
+- 远端数据集列表、分页、导入任务、编辑会话
+- 数据集重命名、删除
+
+#### `src/services/http.service.ts`
+
+- 统一 `fetch` 封装
+- 统一注入 Bearer Token
+- 统一处理错误消息
+- 401/403 时清理本地会话
+
+#### `src/services/security.service.ts`
+
+- 登录、退出、会话读取
+- `local` 模式下演示账号校验
+- `remote` 模式下走 `/api/auth/login`
+
+#### `src/services/session-storage.service.ts`
+
+- 统一管理 token 和当前用户
+- 统一广播会话变化事件
+
+#### `src/services/workbook.service.ts`
+
+- 工作簿列表、读取、保存、删除
+- 自动切换 `local` / `remote`
+
+#### `src/features/view-save/viewSave.service.ts`
+
+- 视图保存、重命名、删除
+
+#### `src/services/audit.service.ts`
+
+- 审计写入和读取
+
+## 6. 后端模块职责
+
+### `backend/src/server.js`
+
+- Express 启动入口
+- API 路由注册
+- 鉴权中间件挂载
+
+### `backend/src/auth.js`
+
+- 登录账号校验
+- JWT 生成与校验
+- `/api` 路径鉴权
+
+### `backend/src/db.js`
+
+- Postgres 连接池
+- 建表逻辑
+- 事务封装
+
+### `backend/src/store.js`
+
+当前最核心的后端业务层，负责：
+
+- 数据集读取与分页
+- 工作簿、视图、审计的存取
+- 导入任务元数据
+- 编辑会话
+- 结果集保存
+- 数据集重命名与删除
+
+### `backend/src/import-jobs.js`
+
+- 调用外部结构化接口
+- 提取对象数组
+- 规范化列结构
+- 写入 `source_*` 三张表
+
+### `backend/src/dataset-format.js`
+
+- 从外部接口返回中提取“结构化对象数组”
+- 推断列结构和字段类型
+- 当前已兼容：
+  - 顶层数组
+  - `data/items/rows/records/result`
+  - `users/products/list`
+  - 顶层对象里的首个对象数组
+
+### `backend/src/worker.js`
+
+- 轮询导入队列
+- 定时调度同步任务
+
+## 7. 页面流转
+
+当前没有引入 React Router。
 
 页面切换在 [`src/main.tsx`](../src/main.tsx) 中通过本地状态完成：
 
@@ -119,512 +277,217 @@ src/
 - `my-analysis`
 - `workbook`
 
-流转关系：
+这种做法适合当前单机版本，但边界也很明确：
 
-1. 未登录时进入 `login`
-2. 登录成功后进入 `home`
-3. 从首页可进入：
-   - 数据集工作簿页
-   - 我的分析页
-4. 从“我的分析”中可重新打开工作簿
+- 没有 URL 深链接
+- 没有浏览器历史路由
+- 没有页面级路由守卫
 
-这种实现方式适合 MVP，但有明显边界：
+## 8. 核心数据模型
 
-- 无 URL 路由
-- 无浏览器历史管理
-- 无深链接
-- 无页面级权限守卫
+核心前端类型位于 [`src/types/models.ts`](../src/types/models.ts)。
 
-如果进入下一阶段，应首先引入真正的路由层。
-
-## 6. 模块职责
-
-### 6.1 `pages/`
-
-页面容器层，负责组织交互流程。
-
-- `LoginPage.tsx`
-  - 登录表单
-  - 提交登录
-  - 显示错误信息
-
-- `AnalysisCenterPage.tsx`
-  - 加载数据集列表
-  - 加载当前用户最近视图和工作簿
-  - 提供入口跳转
-
-- `MyAnalysisPage.tsx`
-  - 展示当前用户的视图与工作簿
-  - 重命名和删除
-
-- `WorkbookPage.tsx`
-  - 当前项目最核心、最复杂的页面
-  - 聚合数据加载、选择、筛选、排序、保存、公式、CSV 导入、复制、删除、状态栏汇总等能力
-  - 处理双击编辑、列名改名等工作簿交互
-
-### 6.2 `components/`
-
-UI 展示与轻交互层。
-
-- `WorkbookShell.tsx`
-  - 使用 `@glideapps/glide-data-grid` 渲染表格
-  - 虚拟化滚动
-  - 单元格编辑
-  - 行列选择
-
-- `Toolbar.tsx`
-  - 搜索
-  - 冻结
-  - CSV 导入
-  - 列宽调整
-  - 保存视图 / 工作簿
-
-- `SecurityGuard.tsx`
-  - 展示导出、复制、脱敏状态
-
-- `Watermark.tsx`
-  - 在页面上覆盖固定水印层
-
-### 6.3 `services/`
-
-服务层主要负责 mock 数据、持久化与领域逻辑。
-
-- `dataset.service.ts`
-  - 提供数据集元信息
-  - 按页生成示例数据
-  - 使用 `papaparse` worker 解析 CSV，并使用 `xlsx` 解析 Excel 文件后导入当前工作簿
-  - 搜索、筛选、排序、分页
-
-- `security.service.ts`
-  - 登录
-  - 获取当前用户
-  - 退出登录
-  - 构建水印文本
-
-- `audit.service.ts`
-  - 记录审计事件到本地
-
-- `workbook.service.ts`
-  - 工作簿保存、查询、删除
-
-### 6.4 `features/`
-
-这里主要放 hook 和局部领域能力。
-
-- `useDataset`
-  - 封装数据集元信息和分页数据加载
-
-- `useSecurity`
-  - 读取当前用户和安全配置
-
-- `useAudit`
-  - 统一发出审计事件
-
-- `viewSave.service.ts`
-  - 个人视图持久化
-
-### 6.5 `adapters/`
-
-[`src/adapters/univer/univerAdapter.ts`](../src/adapters/univer/univerAdapter.ts) 是当前项目中最容易被误读的部分。
-
-它当前不是 Univer 集成代码，而是一个内部抽象层，承担以下职责：
-
-- 隐藏列状态切换
-- 列宽变更
-- 冻结状态变更
-- 当前 Sheet 状态
-- 公式白名单校验入口
-
-当前类名叫 `UniverAdapter`，只是表达“以后可替换为 Univer 或其他表格引擎”的意图。当前仓库并未安装或使用 `@univerjs/*`，实际渲染内核已接入 `@glideapps/glide-data-grid`。
-
-## 7. 关键数据模型
-
-核心类型定义位于 [`src/types/models.ts`](../src/types/models.ts)。
-
-### 7.1 数据集
+### 8.1 数据集
 
 - `DatasetField`
 - `DatasetMeta`
 - `DatasetPageRequest`
 - `DatasetPageResponse`
 
-### 7.2 用户与安全
+其中 `DatasetMeta` 现在已经扩展了：
+
+- `sourceUrl`
+- `requestedBy`
+- `ownerUserId`
+- `sourceDatasetId`
+- `canManage`
+
+### 8.2 编辑会话
+
+- `EditSessionSchema`
+- `EditSessionOperation`
+
+### 8.3 工作簿与视图
+
+- `WorkbookConfig`
+- `ViewConfig`
+
+### 8.4 用户与安全
 
 - `UserContext`
 - `SecurityConfig`
 
-### 7.3 审计
+## 9. 数据库存储模型
 
-- `AuditAction`
-- `AuditEvent`
+### 9.1 源数据集
 
-### 7.4 持久化对象
+- `source_datasets`
+- `source_dataset_columns`
+- `source_dataset_rows`
 
-- `ViewConfig`
-- `WorkbookConfig`
+来源：
 
-这些类型决定了页面状态、服务层输出和持久化结构的基本边界。
+- 手动拉取结构化数据
+- 定时同步
 
-## 8. 工作簿页面实现细节
+### 9.2 结果数据集
 
-[`src/pages/workbook/WorkbookPage.tsx`](../src/pages/workbook/WorkbookPage.tsx) 是当前 MVP 的核心。
+- `saved_datasets`
+- `saved_dataset_columns`
+- `saved_dataset_rows`
 
-### 8.1 为什么这个文件很大
+来源：
 
-当前项目处于 MVP 阶段，许多工作簿能力集中在一个页面内完成，原因是：
+- 编辑会话保存结果集
 
-- 先验证交互闭环
-- 先验证本地数据模型是否可行
-- 暂时不为过早抽象付出拆分成本
+### 9.3 编辑会话
 
-这带来的问题也很明显：
+- `edit_sessions`
+- `edit_session_columns`
+- `edit_session_rows`
+- `edit_patches`
 
-- 文件较长
-- 状态较多
-- 交互耦合较强
-- 测试粒度不够细
+### 9.4 工作簿与视图
 
-### 8.2 主要状态
+- `workbooks`
+- `views`
 
-工作簿页当前维护了多类状态：
+### 9.5 其他表
 
-- 分页：`page`
-- 刷新：`refreshKey`
-- 搜索：`keyword`
-- 过滤：`filters`
-- 排序：`sortBy` / `sortOrder`
-- 工作簿名与 ID：`workbookName` / `workbookId`
-- 公式：`formula` / `formulaError`
-- 表格外观：`gridState`
-- 选择状态：`selectedCells` / `selectedRows` / `selectedColumns`
-- 临时提示：`toast`
-- 自定义列与已删除列：`customColumns` / `removedColumns`
-- 本地快照：`snapshotRows`
+- `users`
+- `audit_events`
+- `import_jobs`
 
-### 8.3 两种数据来源模式
+## 10. 关键链路
 
-工作簿页存在两种数据运行模式：
+### 10.1 登录链路
 
-#### 模式 A：分页 mock 数据模式
+1. 登录页调用 `login(payload)`
+2. `remote` 模式下走 `/api/auth/login`
+3. 后端返回 `accessToken + user`
+4. 前端写入：
+   - `analysis.current.token`
+   - `analysis.current.user`
 
-当没有 `snapshotRows` 时：
+### 10.2 手动拉取结构化数据
 
-- 页面通过 `useDataset` 从 `datasetService` 按页获取数据
-- 数据总量默认为 100 万行
-- 用于验证“分页加载 + 表格浏览”能力
+1. 首页输入名称和接口地址
+2. 前端请求 `POST /api/import-jobs`
+3. 后端写入 `import_jobs`
+4. `worker` 轮询到任务并请求外部接口
+5. 结果经 `dataset-format.js` 解析成字段和行
+6. 写入 `source_*` 三张表
+7. 首页重新拉取列表后，出现新数据集
 
-#### 模式 B：本地快照模式
+### 10.3 打开工作簿
 
-当工作簿被保存、加载或导入 CSV 后：
+1. 首页点击数据集
+2. 工作簿页调用 `useDataset`
+3. 获取 schema 和 rows
+4. 交给 `WorkbookShell` 虚拟化渲染
 
-- 页面使用 `snapshotRows` 作为当前数据源
-- 后续的筛选、排序、分页都在本地快照上进行
-- 支持继续编辑、新增行列、删除行列
+### 10.4 保存工作簿
 
-这意味着当前实现更偏“前端交互验证”，不是完整的大规模服务端数据分析链路。
+1. 前端收集当前视图、字段、行快照、颜色、冻结等状态
+2. 保存到 `/api/workbooks`
+3. 后端落到 `workbooks.payload`
 
-### 8.4 单元格公式
+### 10.5 保存结果集
 
-当前公式能力分成两层：
+1. 当前工作簿若使用远端编辑会话
+2. 调用 `/api/edit-sessions/:id/save`
+3. 后端把会话内容写到 `saved_*` 三张表
 
-1. 输入方式
-   - 直接在单元格中输入，以 `=` 开头时按公式解析
+## 11. 数据集管理能力
 
-2. 真正执行
-   - 位置：[`src/services/formula.service.ts`](../src/services/formula.service.ts)
-   - 当前通过 `fast-formula-parser` 执行 Excel 风格公式
-   - 已支持单元格引用、范围引用和常见函数，如 `SUM`、`AVERAGE`、`IF`、`ROUND`
+目前支持：
 
-因此要特别注意：
+- 重命名数据集
+- 删除数据集
+- 查看来源地址
+- 复制数据集 ID
 
-- 当前不是完整 Excel 工作簿引擎
-- 当前没有跨 Sheet 公式、动态数组溢出和命名区域
+删除限制：
 
-### 8.5 表格渲染方式
+- 如果该数据集仍被当前用户的工作簿或视图引用，则拒绝删除
+- 当前返回 `409`
 
-当前表格渲染基于 `@glideapps/glide-data-grid`：
+当前删除保护只覆盖：
 
-- Canvas 驱动的虚拟化表格
-- 支持大数据量滚动与编辑
-- 行列选择由表格内核管理
+- `workbooks`
+- `views`
 
-优点：
+还没有做跨更多业务对象的完整引用图分析。
 
-- 实现透明
-- 依赖极少
-- 方便演示和改造
+## 12. 配置
 
-缺点：
+### 12.1 前端
 
-- 对超大规模复杂交互不够强
-- 虚拟化、公式引擎、撤销重做、快捷键体系都没有
-- 后续若继续增强，页面复杂度会迅速上升
+前端持久化模式在 [`src/config/persistence.ts`](../src/config/persistence.ts)：
 
-## 9. 服务层说明
+- `VITE_PERSISTENCE_MODE`
+- `VITE_API_BASE_URL`
 
-### 9.1 `dataset.service.ts`
+### 12.2 Docker
 
-关键行为：
+当前 `.env` 支持：
 
-- 固定数据集 ID：`risk_orders`
-- 默认字段：
-  - `orderId`
-  - `customerName`
-  - `amount`
-  - `region`
-  - `createdAt`
-- 未导入 CSV 时按页生成行数据
-- 已导入 CSV 时使用工作簿快照行
-- 搜索与筛选均采用模糊匹配
-- 排序使用中文地区比较器
-- 人工延迟约 `80ms`
+- `NODE_IMAGE`
+- `POSTGRES_IMAGE`
+- `VITE_PERSISTENCE_MODE`
+- `VITE_API_BASE_URL`
 
-### 9.2 `security.service.ts`
+### 12.3 后端
 
-关键行为：
+后端配置在 [`backend/src/config.js`](../backend/src/config.js)。
 
-- 当前用户存储键：`analysis.current.user`
-- 通过 `PBKDF2` 验证密码
-- `mockSecurityConfig` 控制：
-  - 禁导出
-  - 开启水印
-  - 开启脱敏
-  - 是否允许复制
+主要包括：
 
-### 9.3 `audit.service.ts`
+- `PORT`
+- `DATABASE_URL`
+- `JWT_SECRET`
+- 默认登录账号
+- 导入任务轮询频率
+- 定时导入任务配置
 
-关键行为：
+## 13. 开发时最常用命令
 
-- 审计事件存到 `analysis.audit.events`
-- 最多保留 500 条
-- 同时打印 `console.info('[AUDIT]', event)`
+### 前端
 
-### 9.4 `viewSave.service.ts` 与 `workbook.service.ts`
+```bash
+npm run build
+```
 
-二者都使用 `localStorage`。
+### 后端
 
-区别：
+```bash
+cd backend && npm run check
+```
 
-- 视图保存的是筛选、排序、列宽、冻结、可见列等“观察配置”
-- 工作簿保存的是名称、数据集、sheet 配置、列定义、快照行、颜色标记等
+### Docker
 
-## 10. 浏览器原生 API 依赖
+```bash
+docker compose up -d --build
+docker compose ps
+docker compose logs -f api
+docker compose logs -f worker
+docker compose down
+```
 
-项目虽然开源依赖少，但较依赖浏览器原生能力：
+## 14. 当前限制
 
-- `localStorage`
-  - 当前用户
-  - 审计日志
-  - 视图
-  - 工作簿
-  - 导入 CSV 数据
+- 前端仍然是本地状态路由，不是正式路由系统
+- 公式引擎已可用，但还不是完整多 Sheet Excel 引擎
+- 编辑会话当前是“会话表 + patch 日志”方案，不是多人协同架构
+- 接口导入只支持结构化 JSON，不支持 XML、HTML 表格、分页游标串联抓取
+- 工作簿主逻辑仍集中在 [`src/pages/workbook/WorkbookPage.tsx`](../src/pages/workbook/WorkbookPage.tsx)
 
-- `crypto.subtle`
-  - 登录密码哈希校验
+## 15. 下一步建议
 
-- `crypto.randomUUID()`
-  - 生成视图 ID、工作簿 ID
+如果继续演进，建议优先级如下：
 
-- `navigator.clipboard.writeText`
-  - 复制前 20 行
-
-- `File.text()`
-  - 浏览器选择上传文件
-
-- `Worker`
-  - `papaparse` 解析 CSV 时避免阻塞主线程
-
-## 11. 开源组件说明
-
-### 11.1 结论
-
-当前项目“真正直接使用”的开源组件非常少。
-
-直接依赖层：
-
-- React
-- ReactDOM
-- `@glideapps/glide-data-grid`
-- `papaparse`
-- `xlsx`
-- `fast-formula-parser`
-- TypeScript
-- Vite
-- `@vitejs/plugin-react`
-
-关键间接依赖层：
-
-- `esbuild`
-- `rollup`
-- `@babel/core`
-- `react-refresh`
-
-当前没有使用：
-
-- `@glideapps/glide-data-grid` 之外的第三方表格库
-- 第三方 UI 组件库
-- 第三方状态管理库
-- 第三方路由库
-- `@univerjs/*`
-
-### 11.2 当前安装版本
-
-根据当前工作区 `npm ls` 结果：
-
-直接依赖：
-
-- `react@18.3.1`
-- `react-dom@18.3.1`
-- `typescript@5.9.3`
-- `vite@5.4.21`
-- `@vitejs/plugin-react@4.7.0`
-
-关键间接依赖：
-
-- `esbuild@0.21.5`
-- `rollup@4.60.0`
-- `@babel/core@7.29.0`
-- `react-refresh@0.17.0`
-
-注意：
-
-- `package.json` 中使用的是 `^` 范围版本
-- 因此“声明版本”和“当前安装版本”可能不同
-- 文档描述实际运行环境时，应优先写当前安装版本
-
-### 11.3 每个组件的作用
-
-#### React
-
-职责：
-
-- 构建页面和组件
-- 管理组件状态与副作用
-- 驱动工作簿页面的交互刷新
-
-本项目中的典型使用：
-
-- `useState`
-- `useEffect`
-- `useMemo`
-- 函数组件
-
-#### ReactDOM
-
-职责：
-
-- 将 React 组件树挂载到浏览器 DOM
-
-本项目入口：
-
-- [`src/main.tsx`](../src/main.tsx)
-
-#### TypeScript
-
-职责：
-
-- 提供静态类型
-- 定义领域模型
-- 帮助控制页面、服务和持久化结构的一致性
-
-重点文件：
-
-- [`src/types/models.ts`](../src/types/models.ts)
-
-#### Vite
-
-职责：
-
-- 启动开发服务器
-- 处理 ESM 模块
-- 构建生产包
-
-脚本入口：
-
-- `npm run dev`
-- `npm run build`
-- `npm run preview`
-
-#### `@vitejs/plugin-react`
-
-职责：
-
-- 让 Vite 正确处理 React JSX
-- 接入开发期 React 刷新能力
-
-#### esbuild
-
-职责：
-
-- Vite 开发/构建链中的高性能预构建与转换工具
-
-在本项目中：
-
-- 不是手写调用
-- 由 Vite 间接使用
-
-#### rollup
-
-职责：
-
-- Vite 生产构建阶段的打包器核心
-
-在本项目中：
-
-- 同样是 Vite 间接使用
-
-#### `@babel/core`
-
-职责：
-
-- 由 `@vitejs/plugin-react` 间接使用，服务于 JSX/React 开发链转换
-
-#### react-refresh
-
-职责：
-
-- 支持开发期组件热更新体验
-
-### 11.4 为什么文档必须特别说明 `UniverAdapter`
-
-因为从命名上看，开发者很容易误以为项目已经基于 Univer。
-
-实际情况是：
-
-- 当前仓库中没有 `@univerjs/*` 依赖
-- 当前表格渲染由 `@glideapps/glide-data-grid` 承担
-- `UniverAdapter` 只是抽象边界
-
-正确理解应该是：
-
-- 页面层依赖 `UniverAdapter`
-- `UniverAdapter` 当前内部只做状态变换
-- 将来如果要替换成真正的表格引擎，可以优先在适配层收敛改动
-
-## 12. 当前实现的优势与代价
-
-### 优势
-
-- 依赖少，启动快，理解成本低
-- 代码路径短，适合演示和快速迭代
-- 容易观察每个功能是如何落地的
-- 适合先验证在线分析中心的交互闭环
-
-### 代价
-
-- 工作簿页逻辑集中
-- 没有正式路由层
-- 没有后端 API
-- 大文件导入仍然是浏览器本地处理，浏览器内存上限仍然是约束
-- 没有测试体系
-
-## 13. 下一步建议
-
-如果这个项目要从演示走向可持续开发，建议优先做以下事情：
-
-1. 把 `WorkbookPage.tsx` 拆成更小的状态模块和 UI 模块
-2. 引入真正的路由层
-3. 补导入进度、错误定位和字段映射能力
-4. 明确公式白名单与执行器的对应关系
-5. 评估是否需要更完整的 Excel 公式引擎
-6. 把 `localStorage` mock 服务替换成后端 API
+1. 为“手动拉取结构化数据”补请求头、请求方法、请求体配置
+2. 为数据集管理补详情页和删除前依赖预览
+3. 把工作簿页面继续拆分，降低 `WorkbookPage.tsx` 复杂度
+4. 引入正式路由层
+5. 视情况补权限模型和更完整的后端部署方案

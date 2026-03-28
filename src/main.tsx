@@ -1,13 +1,14 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import '@glideapps/glide-data-grid/dist/index.css';
 import { AnalysisCenterPage } from './pages/analysis-center/AnalysisCenterPage';
 import { WorkbookPage } from './pages/workbook/WorkbookPage';
 import { MyAnalysisPage } from './pages/my-analysis/MyAnalysisPage';
 import { LoginPage } from './pages/login/LoginPage';
 import './styles.css';
-import { getCurrentUser, login, logout } from './services/security.service';
+import { hasActiveSession, login, logout } from './services/security.service';
+import { SESSION_CHANGE_EVENT } from './services/session-storage.service';
 
 type Route =
   | { name: 'login' }
@@ -16,7 +17,18 @@ type Route =
   | { name: 'my-analysis' };
 
 function App() {
-  const [route, setRoute] = useState<Route>(() => (getCurrentUser().userId ? { name: 'home' } : { name: 'login' }));
+  const [route, setRoute] = useState<Route>(() => (hasActiveSession() ? { name: 'home' } : { name: 'login' }));
+
+  useEffect(() => {
+    const handleSessionChange = () => {
+      if (!hasActiveSession()) {
+        setRoute({ name: 'login' });
+      }
+    };
+
+    window.addEventListener(SESSION_CHANGE_EVENT, handleSessionChange);
+    return () => window.removeEventListener(SESSION_CHANGE_EVENT, handleSessionChange);
+  }, []);
 
   if (route.name === 'login') {
     return (
@@ -38,8 +50,8 @@ function App() {
         </div>
         <button
           className="button-secondary"
-          onClick={() => {
-            logout();
+          onClick={async () => {
+            await logout();
             setRoute({ name: 'login' });
           }}
         >

@@ -4,7 +4,7 @@ import { getCurrentUser } from '../../services/security.service';
 
 export function useAudit(datasetId?: string, workbookId?: string) {
   function emit(action: AuditAction, payload: Record<string, unknown> = {}): void {
-    auditService.log({
+    void auditService.log({
       action,
       userId: getCurrentUser().userId,
       datasetId,

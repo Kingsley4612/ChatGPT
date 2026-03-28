@@ -13,8 +13,8 @@ export function useDataset(datasetId: string, req: UseDatasetRequest) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    datasetService.getDatasetMeta(datasetId).then(setMeta).catch((e: Error) => setError(e.message));
-  }, [datasetId, req.reloadKey]);
+    datasetService.getDatasetMeta(datasetId, req.editSessionId).then(setMeta).catch((e: Error) => setError(e.message));
+  }, [datasetId, req.editSessionId, req.reloadKey]);
 
   useEffect(() => {
     setLoading(true);
@@ -24,7 +24,7 @@ export function useDataset(datasetId: string, req: UseDatasetRequest) {
       .then(setPage)
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false));
-  }, [datasetId, req.page, req.pageSize, req.sortBy, req.sortOrder, req.keyword, JSON.stringify(req.filters), req.reloadKey]);
+  }, [datasetId, req.editSessionId, req.page, req.pageSize, req.sortBy, req.sortOrder, req.keyword, JSON.stringify(req.filters), req.reloadKey]);
 
   return { meta, page, loading, error };
 }

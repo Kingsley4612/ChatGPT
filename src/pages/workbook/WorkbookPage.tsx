@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CompactSelection, type GridSelection } from '@glideapps/glide-data-grid';
+import { isRemotePersistenceEnabled } from '../../config/persistence';
 import { WorkbookShell } from '../../components/workbook-shell/WorkbookShell';
 import { Toolbar } from '../../components/toolbar/Toolbar';
 import { SecurityGuard } from '../../components/security-guard/SecurityGuard';
@@ -21,7 +22,7 @@ import {
   datasetService,
   getColumnLabel,
 } from '../../services/dataset.service';
-import type { DatasetField, WorkbookConfig } from '../../types/models';
+import type { DatasetField, EditSessionOperation, WorkbookConfig } from '../../types/models';
 
 interface Props {
   datasetId: string;
@@ -269,9 +270,10 @@ export function WorkbookPage(props: Props) {
   const { datasetId, onBack } = props;
   const initialWorkbookId = props.workbookId;
   const isBlankWorkbook = datasetId === BLANK_DATASET_ID;
+  const remoteMode = isRemotePersistenceEnabled();
 
   const [page, setPage] = useState(0);
-  const [refreshKey] = useState(0);
+  const [refreshKey, setRefreshKey] = useState(0);
   const [keyword, setKeyword] = useState('');
   const [sortBy, setSortBy] = useState<string>();
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
@@ -289,6 +291,9 @@ export function WorkbookPage(props: Props) {
   const [initializedKey, setInitializedKey] = useState('');
   const [showColumnManager, setShowColumnManager] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  const [isSavingResult, setIsSavingResult] = useState(false);
+  const [remoteMutationCount, setRemoteMutationCount] = useState(0);
+  const [editSessionId, setEditSessionId] = useState<string | null>(null);
   const [formulaInput, setFormulaInput] = useState('');
   const [nameBoxInput, setNameBoxInput] = useState('');
   const [formulaTarget, setFormulaTarget] = useState<FormulaEditTarget | null>(null);
@@ -298,6 +303,7 @@ export function WorkbookPage(props: Props) {
   const formulaInputRef = useRef<HTMLInputElement>(null);
   const formulaInputSelectionRef = useRef<TextSelectionRange>({ start: 0, end: 0 });
   const pendingFormulaReferencePickRef = useRef(false);
+  const remoteMutationQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   const { user, security } = useSecurity();
   const { emit } = useAudit(datasetId, workbookId ?? undefined);
@@ -308,6 +314,7 @@ export function WorkbookPage(props: Props) {
     sortBy,
     sortOrder,
     filters,
+    editSessionId: editSessionId ?? undefined,
     reloadKey: refreshKey,
   });
 
@@ -318,76 +325,116 @@ export function WorkbookPage(props: Props) {
   }, [adapterFields, meta]);
 
   useEffect(() => {
+    setEditSessionId(null);
+  }, [datasetId, initialWorkbookId]);
+
+  useEffect(() => {
     if (!meta) return;
 
     const routeKey = `${datasetId}:${initialWorkbookId ?? 'new'}`;
     if (initializedKey === routeKey) return;
 
-    const savedWorkbook = initialWorkbookId ? workbookService.getById(initialWorkbookId) : null;
-    const savedSheet = savedWorkbook?.sheets[0] ?? null;
+    let cancelled = false;
 
-    if (!savedWorkbook || !savedSheet) {
+    void (async () => {
+      const savedWorkbook = initialWorkbookId ? await workbookService.getById(initialWorkbookId) : null;
+      const savedSheet = savedWorkbook?.sheets[0] ?? null;
+      const shouldUseRemoteSession = remoteMode && !isBlankWorkbook && !savedSheet?.rowSnapshot;
+      const remoteSession = shouldUseRemoteSession
+        ? await datasetService.createEditSession(savedWorkbook?.datasetId ?? datasetId, savedWorkbook?.name)
+        : null;
+
+      if (cancelled) return;
+
+      if (!savedWorkbook || !savedSheet) {
+        const initialFields = isBlankWorkbook
+          ? cloneFields(meta.fields.length ? meta.fields : createBlankFields())
+          : cloneFields(meta.fields);
+        setWorkbookId(null);
+        setWorkbookName(isBlankWorkbook ? '空白工作簿' : '临时工作簿');
+        setEditSessionId(remoteSession?.sessionId ?? null);
+        setFilters({});
+        setSortBy(undefined);
+        setSortOrder('asc');
+        setPage(0);
+        setSheetFields(initialFields);
+        setWorkingRows([]);
+        setSnapshotRows(isBlankWorkbook ? createBlankRows(DEFAULT_BLANK_ROW_COUNT, initialFields) : null);
+        setGridState(createGridState(initialFields));
+        setCellColors({});
+        setInitializedKey(routeKey);
+        return;
+      }
+
       const initialFields = isBlankWorkbook
-        ? cloneFields(meta.fields.length ? meta.fields : createBlankFields())
-        : cloneFields(meta.fields);
-      setWorkbookId(null);
-      setWorkbookName(isBlankWorkbook ? '空白工作簿' : '临时工作簿');
-      setFilters({});
-      setSortBy(undefined);
-      setSortOrder('asc');
+        ? normalizeBlankWorkbookFields(deriveLegacyFields(savedSheet, meta.fields))
+        : deriveLegacyFields(savedSheet, meta.fields);
+      setWorkbookId(savedWorkbook.workbookId);
+      setWorkbookName(savedWorkbook.name);
+      setEditSessionId(remoteSession?.sessionId ?? null);
+      setFilters(
+        Object.fromEntries(
+          Object.entries(savedSheet.viewConfig.filters).map(([fieldName, value]) => [fieldName, String(value ?? '')]),
+        ),
+      );
+      setSortBy(savedSheet.viewConfig.sortBy);
+      setSortOrder(savedSheet.viewConfig.sortOrder ?? 'asc');
       setPage(0);
       setSheetFields(initialFields);
       setWorkingRows([]);
-      setSnapshotRows(isBlankWorkbook ? createBlankRows(DEFAULT_BLANK_ROW_COUNT, initialFields) : null);
-      setGridState(createGridState(initialFields));
-      setCellColors({});
+      setSnapshotRows(
+        savedSheet.rowSnapshot
+          ? sanitizeLegacyRows(savedSheet.rowSnapshot)
+          : isBlankWorkbook
+            ? createBlankRows(DEFAULT_BLANK_ROW_COUNT, initialFields)
+            : null,
+      );
+      setGridState({
+        hiddenColumns: initialFields
+          .map((field) => field.fieldName)
+          .filter((fieldName) => !savedSheet.viewConfig.visibleColumns.includes(fieldName)),
+        columnWidths: {
+          ...createGridState(initialFields).columnWidths,
+          ...savedSheet.viewConfig.columnWidths,
+        },
+        freeze: savedSheet.viewConfig.freeze,
+        activeSheet: WORKSHEET_NAME,
+      });
+      setCellColors(savedSheet.cellColors ?? {});
       setInitializedKey(routeKey);
-      return;
-    }
+    })();
 
-    const initialFields = isBlankWorkbook
-      ? normalizeBlankWorkbookFields(deriveLegacyFields(savedSheet, meta.fields))
-      : deriveLegacyFields(savedSheet, meta.fields);
-    setWorkbookId(savedWorkbook.workbookId);
-    setWorkbookName(savedWorkbook.name);
-    setFilters(
-      Object.fromEntries(
-        Object.entries(savedSheet.viewConfig.filters).map(([fieldName, value]) => [fieldName, String(value ?? '')]),
-      ),
-    );
-    setSortBy(savedSheet.viewConfig.sortBy);
-    setSortOrder(savedSheet.viewConfig.sortOrder ?? 'asc');
-    setPage(0);
-    setSheetFields(initialFields);
-    setWorkingRows([]);
-    setSnapshotRows(
-      savedSheet.rowSnapshot
-        ? sanitizeLegacyRows(savedSheet.rowSnapshot)
-        : isBlankWorkbook
-          ? createBlankRows(DEFAULT_BLANK_ROW_COUNT, initialFields)
-          : null,
-    );
-    setGridState({
-      hiddenColumns: initialFields
-        .map((field) => field.fieldName)
-        .filter((fieldName) => !savedSheet.viewConfig.visibleColumns.includes(fieldName)),
-      columnWidths: {
-        ...createGridState(initialFields).columnWidths,
-        ...savedSheet.viewConfig.columnWidths,
-      },
-      freeze: savedSheet.viewConfig.freeze,
-      activeSheet: WORKSHEET_NAME,
-    });
-    setCellColors(savedSheet.cellColors ?? {});
-    setInitializedKey(routeKey);
-  }, [datasetId, initialWorkbookId, initializedKey, isBlankWorkbook, meta]);
+    return () => {
+      cancelled = true;
+    };
+  }, [datasetId, initialWorkbookId, initializedKey, isBlankWorkbook, meta, remoteMode]);
 
   const isSnapshotMode = snapshotRows !== null;
+  const isRemoteSessionMode = remoteMode && !isSnapshotMode && Boolean(editSessionId);
+  const currentPageRowKeys = pageData?.rowKeys ?? [];
+  const currentPageRowIndexes = pageData?.rowIndexes ?? [];
 
   useEffect(() => {
     if (isSnapshotMode) return;
     setWorkingRows(sanitizeLegacyRows(pageData?.rows ?? []));
   }, [isSnapshotMode, pageData]);
+
+  useEffect(() => {
+    if (!isRemoteSessionMode || !meta) return;
+
+    setSheetFields(cloneFields(meta.fields));
+    setGridState((prev) => {
+      const base = prev ?? createGridState(meta.fields);
+      const nextColumnWidths = Object.fromEntries(meta.fields.map((field) => [field.fieldName, base.columnWidths[field.fieldName] ?? 140]));
+      const nextHiddenColumns = base.hiddenColumns.filter((fieldName) => meta.fields.some((field) => field.fieldName === fieldName));
+
+      return {
+        ...base,
+        hiddenColumns: nextHiddenColumns,
+        columnWidths: nextColumnWidths,
+      };
+    });
+  }, [isRemoteSessionMode, meta]);
 
   useEffect(() => {
     emit('open_dataset', { datasetId });
@@ -402,6 +449,40 @@ export function WorkbookPage(props: Props) {
     const timer = setTimeout(() => setToast(null), 2400);
     return () => clearTimeout(timer);
   }, [toast]);
+
+  const runRemoteMutation = async <T,>(
+    task: () => Promise<T>,
+    options: { reload?: boolean; successMessage?: string } = {},
+  ): Promise<T> => {
+    setRemoteMutationCount((count) => count + 1);
+    const nextTask = remoteMutationQueueRef.current
+      .catch(() => undefined)
+      .then(task);
+
+    remoteMutationQueueRef.current = nextTask
+      .then(() => undefined)
+      .catch(() => undefined);
+
+    try {
+      const result = await nextTask;
+      if (options.reload) {
+        setRefreshKey((current) => current + 1);
+      }
+      if (options.successMessage) {
+        setToast(options.successMessage);
+      }
+      return result;
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : '远端编辑操作失败');
+      throw error;
+    } finally {
+      setRemoteMutationCount((count) => Math.max(0, count - 1));
+    }
+  };
+
+  const flushRemoteMutations = async () => {
+    await remoteMutationQueueRef.current;
+  };
 
   const snapshotViewport = useMemo(() => {
     if (snapshotRows === null) return null;
@@ -636,13 +717,29 @@ export function WorkbookPage(props: Props) {
     setToast(null);
   };
 
-  const saveWorkbook = (name: string, nextWorkbookId: string) => {
-    workbookService.save({
+  const saveResultDataset = async (name: string) => {
+    if (!editSessionId) return null;
+    setIsSavingResult(true);
+
+    try {
+      await flushRemoteMutations();
+      return await datasetService.saveEditSession(editSessionId, name);
+    } finally {
+      setIsSavingResult(false);
+    }
+  };
+
+  const saveWorkbook = async (name: string, nextWorkbookId: string) => {
+    const nextDatasetId = isRemoteSessionMode
+      ? (await saveResultDataset(`${name}-结果集`))?.datasetId ?? datasetId
+      : datasetId;
+
+    await workbookService.save({
       workbookId: nextWorkbookId,
       ownerUserId: user.userId,
       ownerOrg: user.department,
       name,
-      datasetId,
+      datasetId: nextDatasetId,
       sheets: [
         {
           sheetId: 'sheet-1',
@@ -666,6 +763,8 @@ export function WorkbookPage(props: Props) {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
+
+    return nextDatasetId;
   };
 
   const updateCellValue = (rowIndex: number, fieldName: string, value: string) => {
@@ -677,6 +776,24 @@ export function WorkbookPage(props: Props) {
     }
 
     const dataRowIndex = toDataRowIndex(rowIndex);
+
+    if (isRemoteSessionMode) {
+      const rowKey = currentPageRowKeys[dataRowIndex];
+      setWorkingRows((prev) => prev.map((row, index) => (index === dataRowIndex ? { ...row, [fieldName]: value } : row)));
+
+      if (rowKey) {
+        void runRemoteMutation(() =>
+          datasetService.applyEditSessionOperations(editSessionId!, [
+            {
+              type: 'set_cell',
+              rowKey,
+              fieldName,
+              value,
+            },
+          ]));
+      }
+      return;
+    }
 
     if (isSnapshotMode) {
       const absoluteIndex = activeSourceIndexes[dataRowIndex] ?? dataRowIndex;
@@ -753,6 +870,23 @@ export function WorkbookPage(props: Props) {
   };
 
   const resetToCurrentDataset = () => {
+    if (remoteMode && !isBlankWorkbook) {
+      void (async () => {
+        const nextSession = await datasetService.createEditSession(datasetId, meta.name);
+        setEditSessionId(nextSession.sessionId);
+        setPage(0);
+        setKeyword('');
+        setSortBy(undefined);
+        setSortOrder('asc');
+        setFilters({});
+        setCellColors({});
+        clearSelections();
+        setRefreshKey((current) => current + 1);
+        setToast('已重新创建远端编辑会话');
+      })();
+      return;
+    }
+
     const resetFields = cloneFields(meta.fields);
     setPage(0);
     setKeyword('');
@@ -783,6 +917,28 @@ export function WorkbookPage(props: Props) {
     const count = Math.max(selectedRowIndexes.length, 1);
     const emptyRows = Array.from({ length: count }, () => createEmptyRow(sheetFields));
 
+    if (isRemoteSessionMode) {
+      const targetVisualIndex = selectedRowIndexes.length
+        ? (position === 'before' ? Math.min(...selectedRowIndexes) - 1 : Math.max(...selectedRowIndexes))
+        : primarySelectedRowIndex === HEADER_ROW_INDEX
+          ? -1
+          : (currentPageRowIndexes.length ? currentPageRowIndexes[currentPageRowIndexes.length - 1] : -1);
+      const insertAfterRowIndex = targetVisualIndex < 0 ? null : (currentPageRowIndexes[targetVisualIndex] ?? targetVisualIndex);
+
+      void runRemoteMutation(
+        () =>
+          datasetService.applyEditSessionOperations(editSessionId!, [
+            {
+              type: 'insert_rows',
+              insertAfterRowIndex,
+              rows: emptyRows,
+            },
+          ]),
+        { reload: true, successMessage: `已插入 ${count} 行` },
+      );
+      return;
+    }
+
     if (isSnapshotMode) {
       const insertIndex = selectedRowIndexes.length
         ? (() => {
@@ -811,6 +967,25 @@ export function WorkbookPage(props: Props) {
 
     if (!rowIndexesToDelete.length) {
       setToast('请先选择要删除的数据行');
+      return;
+    }
+
+    if (isRemoteSessionMode) {
+      const rowKeys = rowIndexesToDelete
+        .map((rowIndex) => currentPageRowKeys[rowIndex])
+        .filter((rowKey): rowKey is string => Boolean(rowKey));
+
+      void runRemoteMutation(
+        () =>
+          datasetService.applyEditSessionOperations(editSessionId!, [
+            {
+              type: 'delete_rows',
+              rowKeys,
+            },
+          ]),
+        { reload: true, successMessage: `已删除 ${rowKeys.length} 行` },
+      );
+      clearSelections();
       return;
     }
 
@@ -867,6 +1042,20 @@ export function WorkbookPage(props: Props) {
         : Math.max(...indexes) + 1
       : sheetFields.length;
 
+    if (isRemoteSessionMode) {
+      const operations: EditSessionOperation[] = newFields.map((field, index) => ({
+        type: 'insert_column',
+        insertIndex: insertIndex + index,
+        field,
+      }));
+
+      void runRemoteMutation(
+        () => datasetService.applyEditSessionOperations(editSessionId!, operations),
+        { reload: true, successMessage: `已插入 ${newFields.length} 列` },
+      );
+      return;
+    }
+
     setSheetFields((prev) => insertItems(prev, insertIndex, newFields));
     setWorkingRows((prev) =>
       prev.map((row) => ({ ...row, ...Object.fromEntries(newFields.map((field) => [field.fieldName, ''])) })),
@@ -894,6 +1083,21 @@ export function WorkbookPage(props: Props) {
         : [];
     if (!fieldNames.length) {
       setToast('请先选择要删除的列');
+      return;
+    }
+
+    if (isRemoteSessionMode) {
+      void runRemoteMutation(
+        () =>
+          datasetService.applyEditSessionOperations(editSessionId!, [
+            {
+              type: 'delete_columns',
+              fieldNames,
+            },
+          ]),
+        { reload: true, successMessage: `已删除 ${fieldNames.length} 列` },
+      );
+      clearSelections();
       return;
     }
 
@@ -936,6 +1140,18 @@ export function WorkbookPage(props: Props) {
           : field,
       ),
     );
+
+    if (isRemoteSessionMode) {
+      void runRemoteMutation(() =>
+        datasetService.applyEditSessionOperations(editSessionId!, [
+          {
+            type: 'rename_column',
+            fieldName,
+            title: nextTitle,
+          },
+        ]));
+    }
+
     setToast(nextTitle ? `列名已改为“${nextTitle}”` : '列名已清空');
   };
 
@@ -1003,6 +1219,7 @@ export function WorkbookPage(props: Props) {
                 setSortBy(undefined);
                 setSortOrder('asc');
                 setFilters({});
+                setEditSessionId(null);
                 setSheetFields(importedFields);
                 setWorkingRows([]);
                 setSnapshotRows(result.rows);
@@ -1032,11 +1249,11 @@ export function WorkbookPage(props: Props) {
               setKeyword(value);
               emit('search', { keyword: value });
             }}
-            onSaveView={() => {
+            onSaveView={async () => {
               if (!user.capabilities.canSaveView) return;
               const viewName = prompt('输入视图名称', `视图-${new Date().toLocaleString()}`);
               if (!viewName) return;
-              viewSaveService.save({
+              await viewSaveService.save({
                 viewId: crypto.randomUUID(),
                 ownerUserId: user.userId,
                 ownerOrg: user.department,
@@ -1054,22 +1271,22 @@ export function WorkbookPage(props: Props) {
               emit('save_view', { viewName });
               setToast(`视图“${viewName}”保存成功`);
             }}
-            onSaveWorkbook={() => {
+            onSaveWorkbook={async () => {
               if (!user.capabilities.canSaveWorkbook) return;
               const nextWorkbookId = workbookId ?? crypto.randomUUID();
-              saveWorkbook(workbookName, nextWorkbookId);
+              await saveWorkbook(workbookName, nextWorkbookId);
               setWorkbookId(nextWorkbookId);
               emit('save_workbook', { workbookName });
               setToast(`工作簿“${workbookName}”保存成功`);
             }}
-            onSaveWorkbookAs={() => {
+            onSaveWorkbookAs={async () => {
               if (!user.capabilities.canSaveWorkbook) return;
               const name = prompt('另存为工作簿名称', `${workbookName}-副本`);
               if (!name) return;
               const nextWorkbookId = crypto.randomUUID();
               setWorkbookName(name);
               setWorkbookId(nextWorkbookId);
-              saveWorkbook(name, nextWorkbookId);
+              await saveWorkbook(name, nextWorkbookId);
               setToast(`已另存为“${name}”`);
             }}
           />
@@ -1086,6 +1303,21 @@ export function WorkbookPage(props: Props) {
             <button onClick={() => insertColumnsAt('after')}>右侧插入列</button>
             <button onClick={deleteSelectedColumns}>删除选中列</button>
             <button onClick={resetToCurrentDataset}>{isBlankWorkbook ? '恢复默认空表' : '恢复示例数据'}</button>
+            {isRemoteSessionMode ? (
+              <button
+                onClick={async () => {
+                  const name = prompt('输入保存后的结果集名称', `${workbookName}-结果集`);
+                  if (!name?.trim()) return;
+                  const savedDataset = await saveResultDataset(name.trim());
+                  if (savedDataset) {
+                    setToast(`结果集“${savedDataset.name}”保存成功`);
+                  }
+                }}
+                disabled={isSavingResult || remoteMutationCount > 0}
+              >
+                {isSavingResult ? '保存结果集中...' : '保存结果集'}
+              </button>
+            ) : null}
             <button
               onClick={async () => {
                 if (!(user.capabilities.canCopy && security.allowCopy)) return;

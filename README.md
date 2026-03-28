@@ -1,211 +1,331 @@
-# 内网在线分析中心一期 MVP
+# 内网在线分析中心 v2.0.0
 
-> 目标：在禁止数据导出的前提下，提供接近 Excel 体验的在线分析模块，并可嵌入现有内网系统。
+> 一个面向内网分析场景的在线工作簿系统，当前已经支持本地 Docker 后端、Postgres 持久化、结构化接口导入、类 Excel 编辑和结果独立保存。
 
-## 项目概览
+## 1. 当前版本说明
 
-这是一个基于 React + TypeScript + Vite 的前端演示项目，当前以本地 mock 数据和 `localStorage` 持久化为主，用来验证在线分析中心的一期核心交互。
+当前仓库已经从早期纯前端 MVP，演进到“前端 + 本地 Docker 后端 + Postgres + worker”的完整本地版本。
 
-当前实现重点：
+这一版重点解决了几件事：
 
-- 登录态与用户归属
-- 数据集列表与工作簿入口
-- 类 Excel 网格展示与单元格编辑
-- 排序、筛选、搜索、列宽调整、冻结首行首列
-- 行列选择、批量删除、状态栏汇总
-- `xlsx/xls/csv` 文件导入到当前工作簿
-- 个人视图保存、个人工作簿保存/另存为
-- 水印、脱敏、复制开关、审计记录
+- 前端不再只依赖浏览器 `localStorage`
+- 已支持本地 Docker 全链路部署
+- 已支持通过 HTTP 接口手动拉取结构化数据
+- 已支持大数据量分页读取和虚拟化表格渲染
+- 已支持导入数据集管理：重命名、删除、来源查看、复制数据集 ID
+- 已支持远端编辑会话与结果数据集独立保存
 
-## 技术栈
+## 2. 你现在能做什么
 
-- 运行时：React、ReactDOM
-- 开发语言：TypeScript
-- 构建与开发服务器：Vite
-- 样式方案：原生 CSS
+当前可直接使用的能力：
 
-重要说明：
+- 账号、密码、组织登录
+- 新建空白工作簿
+- 打开已有数据集
+- `csv / xls / xlsx` 文件导入到当前工作簿
+- 通过 HTTP 接口手动拉取结构化 JSON 数据
+- 保存工作簿、另存为、保存视图
+- 将编辑结果独立保存为结果数据集
+- 数据集搜索、重命名、删除、复制 ID、打开来源地址
+- 冻结首行、冻结首列、列宽调整
+- 双击单元格编辑、双击表头改名
+- 行列插入、删除、多选
+- 公式输入、单元格引用、公式栏编辑
+- 水印、脱敏、复制状态展示、审计记录
 
-- 当前仓库没有直接接入 `@univerjs/*`。
-- 当前实际接入的表格内核是 `@glideapps/glide-data-grid`，用于承载大数据量虚拟滚动、编辑和选择能力。
-- [`UniverAdapter`](./src/adapters/univer/univerAdapter.ts) 仍然保留为“表格能力适配边界”，但当前渲染内核已经切换为 Glide Data Grid。
+## 3. 系统架构
 
-## 文档索引
+本地 Docker 模式下，共有四个服务：
 
-- 根说明文档：当前文件
-- 开发文档：[`docs/development.md`](./docs/development.md)
-- 开源组件说明：[`docs/open-source-components.md`](./docs/open-source-components.md)
-- 工作簿模块说明：[`src/features/workbook/README.md`](./src/features/workbook/README.md)
+- `web`
+  承载前端静态资源，并把 `/api/*` 反向代理到 `api`
+- `api`
+  提供认证、数据集、编辑会话、工作簿、视图、审计接口
+- `worker`
+  轮询导入任务队列，执行结构化数据拉取和定时同步
+- `postgres`
+  保存源数据集、结果数据集、工作簿、视图、审计、导入任务
 
-## 目录结构
+浏览器只访问一个入口：
+
+- `http://localhost:8080`
+
+## 4. 仓库结构
+
+```txt
+.
+├── backend/                # 本地 Node 后端
+├── docs/                   # 开发文档、开源组件说明
+├── src/                    # 前端源码
+├── docker-compose.yml      # 本地 Docker 编排
+├── Dockerfile.web          # 前端镜像
+├── web-server.mjs          # 前端静态服务 + API 代理
+└── .env.docker.example     # Docker 环境变量示例
+```
+
+前端核心目录：
 
 ```txt
 src/
-  adapters/
-    univer/
-  components/
-    security-guard/
-    toolbar/
-    watermark/
-    workbook-shell/
-  features/
-    audit/
-    dataset/
-    security/
-    view-save/
-    workbook/
-  pages/
-    analysis-center/
-    login/
-    my-analysis/
-    workbook/
-  services/
-  types/
-  utils/
+├── adapters/
+├── components/
+├── config/
+├── features/
+├── pages/
+├── services/
+├── types/
+└── utils/
 ```
 
-## 页面与功能
+## 5. 运行方式
 
-### 1. 登录页
+### 5.1 纯前端模式
 
-- 账号、密码、组织登录
-- 登录成功后写入当前用户到 `localStorage`
-- 密码校验使用浏览器原生 `crypto.subtle` 做 PBKDF2 派生
-
-### 2. 在线分析中心首页
-
-- 展示最近可用数据集
-- 展示当前用户最近保存的个人视图与工作簿
-- 支持进入“我的分析”或直接打开数据集
-
-### 3. 我的分析页
-
-- 查看当前用户保存的视图和工作簿
-- 支持重命名、删除
-- 支持重新打开工作簿
-
-### 4. 工作簿页
-
-当前已经实现：
-
-- 工具栏搜索
-- 单元格内联公式输入与计算
-- 冻结第 1 行/首列
-- 列宽调整
-- `xlsx/xls/csv` 文件导入到当前工作簿
-- 保存视图
-- 保存工作簿 / 另存为
-- 复制前 20 行
-- 恢复示例数据
-- 新增行 / 新增列
-- 删除选中行 / 删除选中列
-- 复选框隐藏列 / 显示列
-- 单元格拖拽框选
-- 行选择 / 列选择
-- 双击单元格编辑
-- 双击第 1 行单元格改列名
-- 表头排序
-- 列头即时筛选
-- 分页翻页
-- 状态栏 `SUM / AVG / COUNT`
-
-当前未实现或仅做预留：
-
-- 真正的 `@univerjs/*` 集成
-- 完整多 Sheet 编辑界面
-- 后端 API、服务端持久化、权限中心接入
-- 跨表引用、动态数组溢出和多 Sheet 公式联动
-
-## 核心实现说明
-
-### 数据集与分页
-
-[`src/services/dataset.service.ts`](./src/services/dataset.service.ts)
-
-- 内置示例数据集 `risk_orders`
-- 默认总量模拟 `1,000,000` 行
-- 未导入 CSV 时，按页动态生成数据
-- 已导入 CSV 时，基于导入内容做本地筛选、排序和分页
-- 搜索与筛选支持模糊匹配
-- 人工延迟约 `80ms`
-
-### 安全与登录
-
-[`src/services/security.service.ts`](./src/services/security.service.ts)
-
-- 当前用户存在 `analysis.current.user`
-- 安全配置采用前端 mock
-- 页面通过 `SecurityGuard` 展示复制/导出/脱敏状态
-- 页面通过 `Watermark` 添加固定水印层
-
-### 审计
-
-[`src/services/audit.service.ts`](./src/services/audit.service.ts)
-
-- 审计事件写入 `analysis.audit.events`
-- 当前记录的动作包括：
-  - `open_dataset`
-  - `sort`
-  - `filter`
-  - `search`
-  - `copy`
-  - `save_view`
-  - `save_workbook`
-
-### 保存能力
-
-- 个人视图：[`src/features/view-save/viewSave.service.ts`](./src/features/view-save/viewSave.service.ts)
-- 工作簿：[`src/services/workbook.service.ts`](./src/services/workbook.service.ts)
-
-二者都使用 `localStorage` 做演示持久化，并按当前用户归属过滤。
-
-## 当前使用的开源组件
-
-项目直接依赖和构建链细节见：
-
-- [`docs/open-source-components.md`](./docs/open-source-components.md)
-- [`docs/development.md`](./docs/development.md)
-
-结论先说清楚：
-
-- 当前直接使用的开源组件包括 React、ReactDOM、TypeScript、Vite、`@vitejs/plugin-react`、`@glideapps/glide-data-grid`、`papaparse`、`xlsx`、`fast-formula-parser`
-- 当前没有接入第三方 UI 组件库、状态管理库、路由库，但已经接入第三方表格内核
-- `UniverAdapter` 仍然是内部命名，不等于项目已经使用 Univer
-
-## 本地运行
+适合做轻量调试，不依赖 Docker。
 
 ```bash
 npm install
 npm run dev
 ```
 
-默认开发地址一般为：
+默认访问地址：
 
 ```txt
-http://localhost:5173/
+http://localhost:5173
 ```
 
-如果占用端口，Vite 会自动切换到其他端口。
+这一模式下，登录态、视图、工作簿、审计会保存在浏览器本地。
 
-## 构建
+### 5.2 本地 Docker 全链路模式
+
+推荐使用这一模式，这也是当前主文档默认描述的运行方式。
+
+先复制环境文件：
 
 ```bash
-npm run build
-npm run preview
+cp .env.docker.example .env
 ```
 
-## 演示账号
+当前默认值：
 
-当前代码中已配置演示账号：
+```bash
+NODE_IMAGE=node:current-alpine3.23
+POSTGRES_IMAGE=postgres:16-alpine
+VITE_PERSISTENCE_MODE=remote
+VITE_API_BASE_URL=/api
+```
+
+然后启动：
+
+```bash
+docker compose up -d --build
+```
+
+默认端口：
+
+- Web: `http://localhost:8080`
+- API: `http://localhost:8081`
+- Postgres: `localhost:5432`
+
+查看状态：
+
+```bash
+docker compose ps
+```
+
+停止服务：
+
+```bash
+docker compose down
+```
+
+如果需要连同数据库卷一起清空：
+
+```bash
+docker compose down -v
+```
+
+## 6. 登录账号
+
+当前默认本地账号：
 
 - 账号：`kingsley`
+- 密码：`kingsley`
+- 组织：`风控部`
 
-密码哈希存放在 [`src/services/security.service.ts`](./src/services/security.service.ts) 中；如果需要固定明文演示密码，建议在后续版本补一个单独的演示环境说明，而不要把明文密码长期写进公开文档。
+远端模式下，登录成功后会拿到 Bearer Token，并写入浏览器 `localStorage`。
 
-## 已知限制
+## 7. 手动拉取结构化数据
 
-- 当前应用是单页前端应用，页面切换使用本地 `useState`，未引入路由库
-- 工作簿主逻辑集中在 [`src/pages/workbook/WorkbookPage.tsx`](./src/pages/workbook/WorkbookPage.tsx)
-- 当前表格渲染基于 `@glideapps/glide-data-grid`，已具备虚拟化能力；公式计算已接入 `fast-formula-parser`，但跨表、动态数组溢出、协同和完整 Excel 能力仍未覆盖
-- 导入支持 `csv/xlsx/xls`，但当前仍是前端本地解析与本地持久化，不是服务端批量导入链路
-- 持久化全部在浏览器本地，不适合多端协作或正式生产环境
+首页有一个按钮：`手动拉取结构化数据`。
+
+这个功能不是上传文件，而是：
+
+1. 你输入一个接口地址
+2. 前端创建一条导入任务
+3. `worker` 容器异步请求这个接口
+4. 后端把返回的结构化 JSON 转成数据集并写入 Postgres
+5. 新数据集出现在首页列表里
+
+当前支持的典型返回格式：
+
+```json
+[
+  { "市": "赤峰", "县": "松山", "容量": 100 },
+  { "市": "通辽", "县": "科尔沁", "容量": 80 }
+]
+```
+
+```json
+{
+  "data": [
+    { "市": "赤峰", "县": "松山", "容量": 100 }
+  ]
+}
+```
+
+```json
+{
+  "users": [
+    { "id": 1, "firstName": "Emily", "lastName": "Johnson" }
+  ]
+}
+```
+
+当前已验证可用的样例接口：
+
+- `https://dummyjson.com/users?limit=100`
+
+## 8. 数据保存在哪里
+
+### 8.1 导入数据集
+
+手动拉取或定时同步进来的数据，保存在：
+
+- `source_datasets`
+- `source_dataset_columns`
+- `source_dataset_rows`
+
+### 8.2 结果数据集
+
+编辑会话“保存结果集”后，保存在：
+
+- `saved_datasets`
+- `saved_dataset_columns`
+- `saved_dataset_rows`
+
+### 8.3 工作簿
+
+“保存工作簿 / 另存为”保存在：
+
+- `workbooks`
+
+工作簿的完整内容放在 `payload` 字段里，类型是 `jsonb`。
+
+### 8.4 视图
+
+“保存视图”保存在：
+
+- `views`
+
+### 8.5 审计和导入任务
+
+- 审计：`audit_events`
+- 导入任务：`import_jobs`
+- 编辑会话：`edit_sessions` 及相关子表
+
+## 9. 数据集管理能力
+
+首页的数据集卡片当前支持：
+
+- 打开数据集
+- 搜索过滤
+- 复制数据集 ID
+- 打开来源地址
+- 重命名数据集
+- 删除数据集
+
+删除时有保护逻辑：
+
+- 如果该数据集仍被工作簿或视图引用，会拒绝删除
+- 前端会显示明确提示，而不是静默失败
+
+## 10. 页面说明
+
+### 登录页
+
+- 输入账号、密码、组织
+- 远端模式下请求 `/api/auth/login`
+
+### 首页
+
+- 展示数据集列表
+- 展示最近导入任务
+- 展示最近视图和工作簿
+- 支持新建空白工作簿
+- 支持手动拉取结构化数据
+
+### 我的分析
+
+- 展示个人工作簿和视图
+- 支持重命名、删除、重新打开
+
+### 工作簿页
+
+当前已实现：
+
+- 类 Excel 网格
+- 分页读取
+- 双击编辑
+- 公式栏
+- 冻结首行/首列
+- 行列增删
+- 颜色标记
+- 视图保存
+- 工作簿保存
+- 结果数据集保存
+
+## 11. 关键 API
+
+当前后端接口：
+
+- `POST /api/auth/login`
+- `POST /api/auth/logout`
+- `GET /api/datasets`
+- `PATCH /api/datasets/:id`
+- `DELETE /api/datasets/:id`
+- `GET /api/datasets/:id/schema`
+- `GET /api/datasets/:id/rows`
+- `POST /api/import-jobs`
+- `GET /api/import-jobs`
+- `GET /api/import-jobs/:id`
+- `POST /api/edit-sessions`
+- `GET /api/edit-sessions/:id/schema`
+- `GET /api/edit-sessions/:id/rows`
+- `PATCH /api/edit-sessions/:id/patches`
+- `POST /api/edit-sessions/:id/save`
+- `GET /api/workbooks`
+- `GET /api/workbooks/:id`
+- `POST /api/workbooks`
+- `DELETE /api/workbooks/:id`
+- `GET /api/views`
+- `POST /api/views`
+- `PATCH /api/views/:id`
+- `DELETE /api/views/:id`
+- `GET /api/audit/events`
+- `POST /api/audit/events`
+
+## 12. 文档索引
+
+- 开发文档：[docs/development.md](./docs/development.md)
+- 开源组件说明：[docs/open-source-components.md](./docs/open-source-components.md)
+- 工作簿模块说明：[src/features/workbook/README.md](./src/features/workbook/README.md)
+
+## 13. 已知限制
+
+- 还没有接入正式权限平台或 SSO
+- 页面切换仍然使用本地状态，不是 React Router
+- 公式引擎已可用，但还不是完整 Excel 工作簿体系
+- 还没有多人协同编辑
+- 删除数据集目前只保护工作簿和视图引用，不做更复杂的依赖分析
+- 当前部署目标是“本机 Docker 稳定运行”，不是企业级生产集群

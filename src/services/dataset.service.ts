@@ -1,6 +1,17 @@
 import Papa, { type ParseStepResult, type Parser } from 'papaparse';
 import * as XLSX from 'xlsx';
-import type { DatasetField, DatasetMeta, DatasetPageRequest, DatasetPageResponse, FieldType } from '../types/models';
+import { isRemotePersistenceEnabled } from '../config/persistence';
+import { requestJson } from './http.service';
+import type {
+  DatasetField,
+  DatasetMeta,
+  DatasetPageRequest,
+  DatasetPageResponse,
+  EditSessionOperation,
+  EditSessionSchema,
+  FieldType,
+  ImportJob,
+} from '../types/models';
 
 export const SAMPLE_DATASET_ID = 'risk_orders';
 export const BLANK_DATASET_ID = 'blank_workbook';
@@ -260,14 +271,30 @@ const blankDatasetMeta: DatasetMeta = {
   totalRows: DEFAULT_BLANK_ROW_COUNT,
   fields: createBlankFields(),
   updatedAt: new Date().toISOString(),
+  datasetType: 'blank',
 };
 
-class DatasetService {
+interface DatasetRepository {
+  listDatasets(): Promise<DatasetMeta[]>;
+  getDatasetMeta(datasetId: string, editSessionId?: string): Promise<DatasetMeta>;
+  getDatasetPage(req: DatasetPageRequest): Promise<DatasetPageResponse>;
+  renameDataset(datasetId: string, name: string): Promise<DatasetMeta>;
+  deleteDataset(datasetId: string): Promise<void>;
+  listImportJobs(): Promise<ImportJob[]>;
+  createImportJob(payload: { name: string; sourceUrl: string }): Promise<ImportJob>;
+  createEditSession(datasetId: string, name?: string): Promise<EditSessionSchema>;
+  getEditSessionSchema(sessionId: string): Promise<EditSessionSchema>;
+  applyEditSessionOperations(sessionId: string, operations: EditSessionOperation[]): Promise<EditSessionSchema>;
+  saveEditSession(sessionId: string, name: string): Promise<DatasetMeta>;
+}
+
+class LocalDatasetRepository implements DatasetRepository {
   async listDatasets(): Promise<DatasetMeta[]> {
     return [
       {
         ...sampleDatasetMeta,
         updatedAt: new Date().toISOString(),
+        datasetType: 'sample',
       },
     ];
   }
@@ -287,17 +314,8 @@ class DatasetService {
     return {
       ...sampleDatasetMeta,
       updatedAt: new Date().toISOString(),
+      datasetType: 'sample',
     };
-  }
-
-  async importCsv(file: File): Promise<{ imported: number; fields: DatasetField[]; rows: Record<string, unknown>[] }> {
-    const matrix = isSpreadsheetFile(file.name) ? await parseSpreadsheet(file) : await parseCsv(file);
-    return matrixToDataset(matrix);
-  }
-
-  async clearImportedRows(): Promise<void> {
-    localStorage.removeItem('analysis.imported.rows');
-    localStorage.removeItem('analysis.imported.fields');
   }
 
   async getDatasetPage(req: DatasetPageRequest): Promise<DatasetPageResponse> {
@@ -311,6 +329,8 @@ class DatasetService {
         totalRows: rows.length,
         rows,
         hasMore: false,
+        rowKeys: rows.map((_, index) => `blank-${index + 1}`),
+        rowIndexes: rows.map((_, index) => index),
       };
     }
 
@@ -324,8 +344,7 @@ class DatasetService {
     rows = Array.from({ length: endBase - startBase }, (_, index) => generateRow(startBase + index));
 
     if (req.keyword) {
-      const keyword = req.keyword;
-      rows = rows.filter((row) => fuzzyMatchTokens(Object.values(row).join(' '), keyword));
+      rows = rows.filter((row) => fuzzyMatchTokens(Object.values(row).join(' '), req.keyword!));
     }
     if (req.filters) {
       Object.entries(req.filters).forEach(([fieldName, value]) => {
@@ -354,7 +373,237 @@ class DatasetService {
       totalRows: TOTAL_ROWS,
       rows: rows.slice(0, end),
       hasMore: startBase + end < TOTAL_ROWS,
+      rowKeys: rows.slice(0, end).map((_, index) => `sample-${startBase + index + 1}`),
+      rowIndexes: rows.slice(0, end).map((_, index) => startBase + index),
     };
+  }
+
+  async listImportJobs(): Promise<ImportJob[]> {
+    return [];
+  }
+
+  async renameDataset(): Promise<DatasetMeta> {
+    throw new Error('本地模式不支持重命名导入数据集');
+  }
+
+  async deleteDataset(): Promise<void> {
+    throw new Error('本地模式不支持删除导入数据集');
+  }
+
+  async createImportJob(): Promise<ImportJob> {
+    throw new Error('本地模式不支持远端结构化数据拉取');
+  }
+
+  async createEditSession(datasetId: string): Promise<EditSessionSchema> {
+    const meta = await this.getDatasetMeta(datasetId);
+    return {
+      sessionId: crypto.randomUUID(),
+      datasetId,
+      name: `${meta.name} 编辑会话`,
+      totalRows: meta.totalRows,
+      fields: meta.fields,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  async getEditSessionSchema(sessionId: string): Promise<EditSessionSchema> {
+    throw new Error(`local edit session ${sessionId} not supported`);
+  }
+
+  async applyEditSessionOperations(): Promise<EditSessionSchema> {
+    throw new Error('本地模式不支持远端编辑会话');
+  }
+
+  async saveEditSession(_sessionId: string, name: string): Promise<DatasetMeta> {
+    return {
+      datasetId: crypto.randomUUID(),
+      name,
+      totalRows: 0,
+      fields: [],
+      updatedAt: new Date().toISOString(),
+      datasetType: 'saved',
+    };
+  }
+}
+
+class RemoteDatasetRepository implements DatasetRepository {
+  async listDatasets(): Promise<DatasetMeta[]> {
+    return requestJson<DatasetMeta[]>('/api/datasets');
+  }
+
+  async getDatasetMeta(datasetId: string, editSessionId?: string): Promise<DatasetMeta> {
+    if (datasetId === BLANK_DATASET_ID) {
+      return {
+        ...blankDatasetMeta,
+        updatedAt: new Date().toISOString(),
+      };
+    }
+
+    if (editSessionId) {
+      const schema = await this.getEditSessionSchema(editSessionId);
+      return {
+        datasetId,
+        name: schema.name,
+        totalRows: schema.totalRows,
+        fields: schema.fields,
+        updatedAt: schema.updatedAt,
+        datasetType: 'saved',
+      };
+    }
+
+    return requestJson<DatasetMeta>(`/api/datasets/${encodeURIComponent(datasetId)}/schema`);
+  }
+
+  async getDatasetPage(req: DatasetPageRequest): Promise<DatasetPageResponse> {
+    if (req.datasetId === BLANK_DATASET_ID) {
+      const fields = blankDatasetMeta.fields;
+      const rows = createBlankRows(DEFAULT_BLANK_ROW_COUNT, fields);
+      return {
+        datasetId: req.datasetId,
+        page: req.page,
+        pageSize: req.pageSize,
+        totalRows: rows.length,
+        rows,
+        hasMore: false,
+        rowKeys: rows.map((_, index) => `blank-${index + 1}`),
+        rowIndexes: rows.map((_, index) => index),
+      };
+    }
+
+    const query = new URLSearchParams({
+      offset: String(req.page * req.pageSize),
+      limit: String(req.pageSize),
+    });
+
+    if (req.sortBy) query.set('sortBy', req.sortBy);
+    if (req.sortOrder) query.set('sortOrder', req.sortOrder);
+    if (req.keyword) query.set('keyword', req.keyword);
+    if (req.filters && Object.keys(req.filters).length) query.set('filters', JSON.stringify(req.filters));
+
+    const path = req.editSessionId
+      ? `/api/edit-sessions/${encodeURIComponent(req.editSessionId)}/rows?${query.toString()}`
+      : `/api/datasets/${encodeURIComponent(req.datasetId)}/rows?${query.toString()}`;
+    const response = await requestJson<Omit<DatasetPageResponse, 'datasetId' | 'page' | 'pageSize'>>(path);
+
+    return {
+      datasetId: req.datasetId,
+      page: req.page,
+      pageSize: req.pageSize,
+      totalRows: response.totalRows,
+      rows: response.rows,
+      hasMore: response.hasMore,
+      rowKeys: response.rowKeys,
+      rowIndexes: response.rowIndexes,
+    };
+  }
+
+  async listImportJobs(): Promise<ImportJob[]> {
+    return requestJson<ImportJob[]>('/api/import-jobs');
+  }
+
+  async renameDataset(datasetId: string, name: string): Promise<DatasetMeta> {
+    return requestJson<DatasetMeta>(`/api/datasets/${encodeURIComponent(datasetId)}`, {
+      method: 'PATCH',
+      body: { name },
+    });
+  }
+
+  async deleteDataset(datasetId: string): Promise<void> {
+    await requestJson<void>(`/api/datasets/${encodeURIComponent(datasetId)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async createImportJob(payload: { name: string; sourceUrl: string }): Promise<ImportJob> {
+    return requestJson<ImportJob>('/api/import-jobs', {
+      method: 'POST',
+      body: payload,
+    });
+  }
+
+  async createEditSession(datasetId: string, name?: string): Promise<EditSessionSchema> {
+    return requestJson<EditSessionSchema>('/api/edit-sessions', {
+      method: 'POST',
+      body: { datasetId, name },
+    });
+  }
+
+  async getEditSessionSchema(sessionId: string): Promise<EditSessionSchema> {
+    return requestJson<EditSessionSchema>(`/api/edit-sessions/${encodeURIComponent(sessionId)}/schema`);
+  }
+
+  async applyEditSessionOperations(sessionId: string, operations: EditSessionOperation[]): Promise<EditSessionSchema> {
+    return requestJson<EditSessionSchema>(`/api/edit-sessions/${encodeURIComponent(sessionId)}/patches`, {
+      method: 'PATCH',
+      body: { operations },
+    });
+  }
+
+  async saveEditSession(sessionId: string, name: string): Promise<DatasetMeta> {
+    return requestJson<DatasetMeta>(`/api/edit-sessions/${encodeURIComponent(sessionId)}/save`, {
+      method: 'POST',
+      body: { name },
+    });
+  }
+}
+
+class DatasetService {
+  private readonly repository: DatasetRepository = isRemotePersistenceEnabled()
+    ? new RemoteDatasetRepository()
+    : new LocalDatasetRepository();
+
+  async listDatasets(): Promise<DatasetMeta[]> {
+    return this.repository.listDatasets();
+  }
+
+  async getDatasetMeta(datasetId: string, editSessionId?: string): Promise<DatasetMeta> {
+    return this.repository.getDatasetMeta(datasetId, editSessionId);
+  }
+
+  async importCsv(file: File): Promise<{ imported: number; fields: DatasetField[]; rows: Record<string, unknown>[] }> {
+    const matrix = isSpreadsheetFile(file.name) ? await parseSpreadsheet(file) : await parseCsv(file);
+    return matrixToDataset(matrix);
+  }
+
+  async clearImportedRows(): Promise<void> {
+    localStorage.removeItem('analysis.imported.rows');
+    localStorage.removeItem('analysis.imported.fields');
+  }
+
+  async getDatasetPage(req: DatasetPageRequest): Promise<DatasetPageResponse> {
+    return this.repository.getDatasetPage(req);
+  }
+
+  async listImportJobs(): Promise<ImportJob[]> {
+    return this.repository.listImportJobs();
+  }
+
+  async renameDataset(datasetId: string, name: string): Promise<DatasetMeta> {
+    return this.repository.renameDataset(datasetId, name);
+  }
+
+  async deleteDataset(datasetId: string): Promise<void> {
+    return this.repository.deleteDataset(datasetId);
+  }
+
+  async createImportJob(payload: { name: string; sourceUrl: string }): Promise<ImportJob> {
+    return this.repository.createImportJob(payload);
+  }
+
+  async createEditSession(datasetId: string, name?: string): Promise<EditSessionSchema> {
+    return this.repository.createEditSession(datasetId, name);
+  }
+
+  async getEditSessionSchema(sessionId: string): Promise<EditSessionSchema> {
+    return this.repository.getEditSessionSchema(sessionId);
+  }
+
+  async applyEditSessionOperations(sessionId: string, operations: EditSessionOperation[]): Promise<EditSessionSchema> {
+    return this.repository.applyEditSessionOperations(sessionId, operations);
+  }
+
+  async saveEditSession(sessionId: string, name: string): Promise<DatasetMeta> {
+    return this.repository.saveEditSession(sessionId, name);
   }
 }
 

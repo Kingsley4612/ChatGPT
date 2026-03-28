@@ -1,18 +1,27 @@
+import { isRemotePersistenceEnabled } from '../../config/persistence';
 import type { ViewConfig } from '../../types/models';
+import { readJson, writeJson } from '../../services/browser-storage.service';
+import { requestJson } from '../../services/http.service';
 
-class ViewSaveService {
+interface ViewRepository {
+  listByUser(userId: string): Promise<ViewConfig[]>;
+  save(view: ViewConfig): Promise<ViewConfig>;
+  rename(viewId: string, name: string): Promise<void>;
+  remove(viewId: string): Promise<void>;
+}
+
+class LocalViewRepository implements ViewRepository {
   private readonly key = 'analysis.views';
 
-  list(): ViewConfig[] {
-    const raw = localStorage.getItem(this.key);
-    return raw ? (JSON.parse(raw) as ViewConfig[]) : [];
+  private list(): ViewConfig[] {
+    return readJson<ViewConfig[]>(this.key, []);
   }
 
-  listByUser(userId: string): ViewConfig[] {
+  async listByUser(userId: string): Promise<ViewConfig[]> {
     return this.list().filter((v) => v.ownerUserId === userId);
   }
 
-  save(view: ViewConfig): ViewConfig {
+  async save(view: ViewConfig): Promise<ViewConfig> {
     const list = this.list();
     const idx = list.findIndex((v) => v.viewId === view.viewId);
     if (idx >= 0) {
@@ -20,18 +29,64 @@ class ViewSaveService {
     } else {
       list.unshift(view);
     }
-    localStorage.setItem(this.key, JSON.stringify(list));
+    writeJson(this.key, list);
     return view;
   }
 
-  rename(viewId: string, name: string): void {
-    const list = this.list().map((v) => (v.viewId === viewId ? { ...v, name } : v));
-    localStorage.setItem(this.key, JSON.stringify(list));
+  async rename(viewId: string, name: string): Promise<void> {
+    writeJson(this.key, this.list().map((v) => (v.viewId === viewId ? { ...v, name } : v)));
   }
 
-  remove(viewId: string): void {
-    const list = this.list().filter((v) => v.viewId !== viewId);
-    localStorage.setItem(this.key, JSON.stringify(list));
+  async remove(viewId: string): Promise<void> {
+    writeJson(this.key, this.list().filter((v) => v.viewId !== viewId));
+  }
+}
+
+class RemoteViewRepository implements ViewRepository {
+  async listByUser(userId: string): Promise<ViewConfig[]> {
+    return requestJson<ViewConfig[]>(`/api/views?ownerUserId=${encodeURIComponent(userId)}`);
+  }
+
+  async save(view: ViewConfig): Promise<ViewConfig> {
+    return requestJson<ViewConfig>('/api/views', {
+      method: 'POST',
+      body: view,
+    });
+  }
+
+  async rename(viewId: string, name: string): Promise<void> {
+    await requestJson<void>(`/api/views/${encodeURIComponent(viewId)}`, {
+      method: 'PATCH',
+      body: { name },
+    });
+  }
+
+  async remove(viewId: string): Promise<void> {
+    await requestJson<void>(`/api/views/${encodeURIComponent(viewId)}`, {
+      method: 'DELETE',
+    });
+  }
+}
+
+class ViewSaveService {
+  private readonly repository: ViewRepository = isRemotePersistenceEnabled()
+    ? new RemoteViewRepository()
+    : new LocalViewRepository();
+
+  listByUser(userId: string): Promise<ViewConfig[]> {
+    return this.repository.listByUser(userId);
+  }
+
+  save(view: ViewConfig): Promise<ViewConfig> {
+    return this.repository.save(view);
+  }
+
+  rename(viewId: string, name: string): Promise<void> {
+    return this.repository.rename(viewId, name);
+  }
+
+  remove(viewId: string): Promise<void> {
+    return this.repository.remove(viewId);
   }
 }
 

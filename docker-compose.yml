@@ -1,0 +1,93 @@
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    environment:
+      POSTGRES_DB: analysis_center
+      POSTGRES_USER: analysis
+      POSTGRES_PASSWORD: analysis
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U analysis -d analysis_center"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build:
+      context: ./backend
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:current-alpine3.23}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PORT: 8081
+      DATABASE_URL: postgresql://analysis:analysis@postgres:5432/analysis_center
+      JWT_SECRET: analysis-center-local-dev-secret
+      APP_LOGIN_ACCOUNT: kingsley
+      APP_LOGIN_PASSWORD: kingsley
+      APP_LOGIN_ORG: 风控部
+      APP_LOGIN_USER_NAME: kingsley
+      IMPORT_POLL_INTERVAL_MS: 3000
+      SCHEDULED_IMPORT_SOURCES: >
+        [
+          {
+            "name": "定时示例结构化数据",
+            "url": "http://api:8081/api/mock/external-dataset?rows=5000",
+            "schedule": "0 */6 * * *"
+          }
+        ]
+    ports:
+      - "8081:8081"
+
+  worker:
+    build:
+      context: ./backend
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:current-alpine3.23}
+    command: ["npm", "run", "start:worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_started
+    environment:
+      PORT: 8081
+      DATABASE_URL: postgresql://analysis:analysis@postgres:5432/analysis_center
+      JWT_SECRET: analysis-center-local-dev-secret
+      APP_LOGIN_ACCOUNT: kingsley
+      APP_LOGIN_PASSWORD: kingsley
+      APP_LOGIN_ORG: 风控部
+      APP_LOGIN_USER_NAME: kingsley
+      IMPORT_POLL_INTERVAL_MS: 3000
+      SCHEDULED_IMPORT_SOURCES: >
+        [
+          {
+            "name": "定时示例结构化数据",
+            "url": "http://api:8081/api/mock/external-dataset?rows=5000",
+            "schedule": "0 */6 * * *"
+          }
+        ]
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:current-alpine3.23}
+        VITE_PERSISTENCE_MODE: remote
+        VITE_API_BASE_URL: /api
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      PORT: 8080
+      API_PROXY_TARGET: http://api:8081
+    ports:
+      - "8080:8080"
+
+volumes:
+  postgres_data:

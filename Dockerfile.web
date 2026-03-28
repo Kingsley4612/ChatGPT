@@ -1,0 +1,31 @@
+ARG NODE_IMAGE=node:current-alpine3.23
+FROM ${NODE_IMAGE} AS builder
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY . .
+
+ARG VITE_PERSISTENCE_MODE=remote
+ARG VITE_API_BASE_URL=/api
+
+ENV VITE_PERSISTENCE_MODE=${VITE_PERSISTENCE_MODE}
+ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
+
+RUN npm run build
+
+FROM ${NODE_IMAGE}
+
+COPY --from=builder /app/dist /usr/share/nginx/html
+COPY web-server.mjs /app/web-server.mjs
+
+WORKDIR /app
+
+ENV WEB_ROOT=/usr/share/nginx/html
+ENV API_PROXY_TARGET=http://api:8081
+
+EXPOSE 8080
+
+CMD ["node", "/app/web-server.mjs"]
